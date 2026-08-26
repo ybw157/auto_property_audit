@@ -1,0 +1,9 @@
+#!/usr/bin/expect -f
+# scp 上传补丁包到服务器
+set timeout 60
+set password "Yz@190054143"
+spawn scp -o StrictHostKeyChecking=no "/Users/fengkexin/Library/Application Support/TRAE SOLO CN/ModularData/ai-agent/work-mode-projects/6a6bf2880fecb6ef6b961405/login-auth-patch.zip" ubuntu@1.13.189.36:/tmp/login-auth-patch.zip
+expect {
+    "password:" { send "$password\r"; exp_continue }
+    eof
+}

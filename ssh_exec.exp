@@ -1,0 +1,10 @@
+#!/usr/bin/expect -f
+# 用法: ./ssh_exec.exp "命令"
+set timeout 30
+set password "Yz@190054143"
+set cmd [lindex $argv 0]
+spawn ssh -o StrictHostKeyChecking=no ubuntu@1.13.189.36 $cmd
+expect {
+    "password:" { send "$password\r"; exp_continue }
+    eof
+}

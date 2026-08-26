@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境
+.venv/
+venv/
+
+# 后端运行时数据（上传文件、报告、数据库、合同、BI数据）
+backend/storage/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+
+# 环境变量
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

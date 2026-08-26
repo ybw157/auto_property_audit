@@ -1,0 +1,18 @@
+#!/usr/bin/expect -f
+# 重启后端：杀旧进程 + 启动新进程
+set timeout 30
+set password "Yz@190054143"
+spawn ssh -o StrictHostKeyChecking=no ubuntu@1.13.189.36
+expect "password:" { send "$password\r" }
+expect "$ " { send "sudo pkill -9 -f 'uvicorn app.main'\r" }
+expect "password" { send "$password\r" }
+expect "$ " { send "sleep 2 && echo KILLED\r" }
+expect "KILLED" {}
+expect "$ " { send "cd /home/ubuntu/audit-platform/backend\r" }
+expect "$ " { send "sudo nohup /home/ubuntu/doc-platform/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4 --limit-concurrency 50 > /tmp/uvicorn.log 2>&1 &\r" }
+expect "password" { send "$password\r" }
+expect "$ " { send "sleep 4\r" }
+expect "$ " { send "ps aux | grep uvicorn | grep -v grep\r" }
+expect "$ " { send "tail -15 /tmp/uvicorn.log\r" }
+expect "$ " { send "exit\r" }
+expect eof
