@@ -48,6 +48,30 @@ def styles():
     base.add(ParagraphStyle(name="CNNote", fontName=FONT_NAME, fontSize=9, leading=14, textColor=colors.HexColor("#475569")))
     return base
 
+# def infer_service_type(results: dict) -> str:
+#     """从审核结果中推断服务类型（保安/保洁/保安保洁）。"""
+#     contracts = results.get("contracts", [])
+#     service_types = set()
+#     for c in contracts:
+#         st = str(c.get("service_type", "")).strip()
+#         if st:
+#             service_types.add(st)
+#     if not service_types:
+#         # 从排班岗位名推断
+#         for detail in results.get("attendance_details", [])[:200]:
+#             pos = str(detail.get("position", ""))
+#             if "保安" in pos:
+#                 service_types.add("保安")
+#             elif "保洁" in pos:
+#                 service_types.add("保洁")
+#         if not service_types:
+#             return "保洁"
+#     if "保安" in service_types and "保洁" in service_types:
+#         return "保安保洁"
+#     if "保安" in service_types:
+#         return "保安"
+#     return "保洁"
+
 def build_pdf(batch_id: int, report_dir: Path, title: str, results: dict, keys: list[str]) -> dict:
     file_path = report_dir / f"{title}.pdf"
     doc = SimpleDocTemplate(str(file_path), pagesize=landscape(A4), leftMargin=12*mm, rightMargin=12*mm, topMargin=12*mm, bottomMargin=12*mm)
@@ -64,8 +88,8 @@ def build_pdf(batch_id: int, report_dir: Path, title: str, results: dict, keys: 
     return {"report_type": title, "file_format": "pdf", "file_path": str(file_path), "download_url": f"/files/reports/{batch_id}/{title}.pdf"}
 
 def build_attendance_base_pdf(batch_id: int, report_dir: Path, results: dict) -> dict:
-    service_type = infer_service_type(results)
-    title = f"{service_type}考勤明细"
+    # service_type = infer_service_type(results)
+    title = f"考勤明细"
     file_path = report_dir / f"{title}.pdf"
     doc = SimpleDocTemplate(
         str(file_path),
@@ -98,29 +122,7 @@ def build_attendance_base_pdf(batch_id: int, report_dir: Path, results: dict) ->
     doc.build(story)
     return {"report_type": title, "file_format": "pdf", "file_path": str(file_path), "download_url": f"/files/reports/{batch_id}/{title}.pdf"}
 
-def infer_service_type(results: dict) -> str:
-    """从审核结果中推断服务类型（保安/保洁/保安保洁）。"""
-    contracts = results.get("contracts", [])
-    service_types = set()
-    for c in contracts:
-        st = str(c.get("service_type", "")).strip()
-        if st:
-            service_types.add(st)
-    if not service_types:
-        # 从排班岗位名推断
-        for detail in results.get("attendance_details", [])[:200]:
-            pos = str(detail.get("position", ""))
-            if "保安" in pos:
-                service_types.add("保安")
-            elif "保洁" in pos:
-                service_types.add("保洁")
-        if not service_types:
-            return "保洁"
-    if "保安" in service_types and "保洁" in service_types:
-        return "保安保洁"
-    if "保安" in service_types:
-        return "保安"
-    return "保洁"
+
 
 def infer_report_month(results: dict) -> str:
     explicit = results.get("project_info", {}).get("审核月份", "")
@@ -310,8 +312,8 @@ def is_serious_exception(row: dict) -> bool:
     return "缺勤" in text or "漏打卡" in text or "未打卡" in text
 
 def build_ai_pdf(batch_id: int, report_dir: Path, results: dict) -> dict:
-    service_type = infer_service_type(results)
-    title = f"{service_type}AI审核汇总"
+    # service_type = infer_service_type(results)
+    title = f"AI审核汇总"
     file_path = report_dir / f"{title}.pdf"
     doc = SimpleDocTemplate(str(file_path), pagesize=landscape(A4), leftMargin=10*mm, rightMargin=10*mm, topMargin=12*mm, bottomMargin=12*mm)
     s = styles()
@@ -327,7 +329,7 @@ def build_ai_pdf(batch_id: int, report_dir: Path, results: dict) -> dict:
     confirmed_exception_rate = summary.get("confirmed_exception_rate") or (round(confirmed_exception_count / schedule_count * 100, 1) if schedule_count > 0 else 0)
     total_deduction = summary.get("total_deduction", 0) or 0
     story = [
-        Paragraph(f"外包{service_type}考勤 AI 审核报告", s["CNTitle"]),
+        Paragraph(f"外包考勤 AI 审核报告", s["CNTitle"]),
         Paragraph(f"{project_info.get('项目名称', '')}（{business_type}）｜{audit_month}｜生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", s["CNBody"]),
         Spacer(1, 8),
         Paragraph("一、项目概况", s["CNHeading"]),
@@ -357,8 +359,8 @@ def build_ai_pdf(batch_id: int, report_dir: Path, results: dict) -> dict:
 
 def build_deduction_pdf(batch_id: int, report_dir: Path, results: dict) -> dict:
     """生成扣款金额报告PDF，含异常率和扣款明细。"""
-    service_type = infer_service_type(results)
-    title = f"{service_type}扣款金额报告"
+    # service_type = infer_service_type(results)
+    title = f"扣款金额报告"
     file_path = report_dir / f"{title}.pdf"
     doc = SimpleDocTemplate(str(file_path), pagesize=landscape(A4), leftMargin=10*mm, rightMargin=10*mm, topMargin=12*mm, bottomMargin=12*mm)
     s = styles()
@@ -376,7 +378,7 @@ def build_deduction_pdf(batch_id: int, report_dir: Path, results: dict) -> dict:
     skipped_count = summary.get("skipped_count", 0) or 0
 
     story = [
-        Paragraph(f"外包{service_type}考勤扣款金额报告", s["CNTitle"]),
+        Paragraph(f"外包考勤扣款金额报告", s["CNTitle"]),
         Paragraph(f"{project_info.get('项目名称', '')}（{business_type}）｜{audit_month}｜生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", s["CNBody"]),
         Spacer(1, 8),
         Paragraph("一、项目概况", s["CNHeading"]),
@@ -417,8 +419,8 @@ def build_deduction_pdf(batch_id: int, report_dir: Path, results: dict) -> dict:
 
 def build_combined_report_pdf(batch_id: int, report_dir: Path, results: dict) -> dict:
     """生成合并报告PDF：AI审核汇总 + 扣款金额报告合并为一个PDF。"""
-    service_type = infer_service_type(results)
-    title = f"{service_type}AI审核汇总与扣款报告"
+    # service_type = infer_service_type(results)
+    title = f"AI审核汇总与扣款报告"
     file_path = report_dir / f"{title}.pdf"
     doc = SimpleDocTemplate(str(file_path), pagesize=landscape(A4), leftMargin=10*mm, rightMargin=10*mm, topMargin=12*mm, bottomMargin=12*mm)
     s = styles()
@@ -438,7 +440,7 @@ def build_combined_report_pdf(batch_id: int, report_dir: Path, results: dict) ->
     position_deduction = summary.get("position_deduction_amount", 0) or 0
 
     story = [
-        Paragraph(f"外包{service_type}考勤 AI 审核汇总与扣款报告", s["CNTitle"]),
+        Paragraph(f"外包考勤 AI 审核汇总与扣款报告", s["CNTitle"]),
         Paragraph(f"{project_info.get('项目名称', '')}（{business_type}）｜{audit_month}｜生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", s["CNBody"]),
         Spacer(1, 8),
         Paragraph("一、项目概况", s["CNHeading"]),
@@ -683,7 +685,7 @@ def month_days(year: int, month: int) -> int:
 def build_copyable_summary(results: dict) -> str:
     project = results.get("project_info", {}).get("项目名称", "")
     business_type = "、".join(results.get("audit_business_types", [])) or "保洁"
-    service_type = infer_service_type(results)
+    # service_type = infer_service_type(results)
     audit_month = format_audit_month(results.get("project_info", {}).get("审核月份") or infer_report_month(results))
     summary = results.get("summary", {})
     exception_stats = results.get("exception_statistics", [])
@@ -691,7 +693,7 @@ def build_copyable_summary(results: dict) -> str:
     attendance_deduction = summary.get("attendance_deduction_amount", 0) or 0
     total_deduction = summary.get("total_deduction", 0) or 0
     return (
-        f"{project}{business_type}外包{service_type}{audit_month}考勤审核完成。"
+        f"{project}{business_type}外包{audit_month}考勤审核完成。"
         f"本次以月度排班表为唯一审核依据，覆盖{summary.get('audited_days', 0)}个日期、{summary.get('position_count', 0)}类岗位、{summary.get('schedule_task_count', 0)}条排班任务，"
         f"人员考勤异常{summary.get('exception_count', 0)}人次。"
         f"重点异常为：{top_exceptions}。"

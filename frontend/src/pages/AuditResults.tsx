@@ -506,7 +506,8 @@ function buildDashboardView(data: DashboardData) {
   const exceptionPeople = new Set(exceptionRows.map((item) => String(item.employee_name || '')).filter(Boolean))
   const allAuditedPeople = new Set(data.exceptions.map((item) => String(item.employee_name || '')).filter(Boolean))
   const auditedDays = new Set(data.positionFulfillment.map((item) => String(item.work_date || '')).filter(Boolean)).size
-  const exceptionCount = exceptionRows.length
+  // 异常记录 = 每条 deductionDetails（即每个员工的扣款汇总）一行，与 MetricCard「异常记录」口径一致
+  const exceptionCount = data.exceptions.length
   const scheduleTaskCount = data.positionFulfillment.length
   // 异常率 = 异常记录数 / 排班任务数（与 AiAudit 进度条 / 后端 finalize 同口径）
   const firstExceptionRate = scheduleTaskCount > 0

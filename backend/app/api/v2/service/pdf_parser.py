@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 def extract_contract_metadata(path: Path, original_name: str) -> dict:
     text = extract_contract_text(Path(path))
     source = f"{Path(original_name).stem}\n{text}"
-    start_date, end_date = extract_date_range(source)
+    # 合同有效期：按用户口径只读『合同期限』这一行（不再依赖"自/从/起"前缀）
+    start_date, end_date = extract_contract_period(source)
     return {
         "project_name": extract_project_name(source),
         "business_type": extract_business_type(source),
@@ -21,38 +22,26 @@ def extract_contract_metadata(path: Path, original_name: str) -> dict:
         "contract_name": Path(original_name).stem,
         "service_type": "保洁" if "保洁" in source else ("保安" if "保安" in source else "保洁"),
         "version": extract_first(source, [r"版本[:：\s]*([A-Za-z0-9_\-\.]+)"]),
-        "start_date": start_date or normalize_date_text(
-            extract_first(source, [
-                r"(?:开始日期|合同开始|合同期自|服务期自|起止日期自|起始日期)[:：\s]*(\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2})",
-                r"(?:自|从|起)\s*(\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2})\s*(?:起)?(?:至|到|止)",
-            ])
-        ),
-        "end_date": end_date or normalize_date_text(
-            extract_first(source, [
-                r"(?:结束日期|合同结束|合同期至|服务期至|起止日期至|终止日期)[:：\s]*(\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2})",
-                r"(?:至|到|止)\s*(\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2})",
-            ])
-        ),
+        "start_date": start_date,
+        "end_date": end_date,
         "rules": extract_contract_rules(source),
     }
 
 
-def extract_date_range(text: str) -> tuple[str, str]:
-    """从合同文本中提取起止日期，优先匹配'自 date1 至 date2'的区间写法。"""
-    range_patterns = [
-        r"(?:自|从|起)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)\s*(?:起)?\s*(?:至|到|止)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)",
-        r"(?:自|从|起)\s*(\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2})\s*(?:起)?\s*(?:至|到|止)\s*(\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2})",
-        r"有效期(?:自|从|起)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日).{0,15}?(?:至|到|止)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)",
-        r"服务期(?:限)?(?:自|从)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日).{0,15}?(?:至|到|止)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)",
-        r"合同期(?:限)?(?:自|从)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日).{0,15}?(?:至|到|止)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)",
-    ]
-    for pattern in range_patterns:
-        m = re.search(pattern, text)
-        if m:
-            start = normalize_date_text(m.group(1))
-            end = normalize_date_text(m.group(2))
-            if start and end:
-                return start, end
+def extract_contract_period(text: str) -> tuple[str, str]:
+    """读『合同期限』这一行的两个日期（用户要求简化口径，不再依赖"自/从/起"前缀）。
+
+    匹配优先级：
+    1. 找第一行形如『合同期限：xxxx 至 xxxx』的内容
+    2. 从该行内提取两个 YYYY-MM-DD 形式日期
+    """
+    m = re.search(r"合同期限[:：\s]*([^\n\r]{2,120})", text)
+    if not m:
+        return "", ""
+    line = m.group(1)
+    dates = re.findall(r"\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2}", line)
+    if len(dates) >= 2:
+        return normalize_date_text(dates[0]), normalize_date_text(dates[1])
     return "", ""
 
 
@@ -61,10 +50,11 @@ def extract_contract_text(path: Path) -> str:
         from pypdf import PdfReader
 
         reader = PdfReader(str(path))
-        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        # 用 \f（form feed）分隔每页，extract_supplier 借此只读第一页乙方字段
+        text = "\f".join(page.extract_text() or "" for page in reader.pages)
         stripped = text.strip()
         meaningful_chars = len(
-            stripped.replace("契约锁", "").replace(" ", "").replace("\n", "").replace("\r", "")
+            stripped.replace("契约锁", "").replace(" ", "").replace("\n", "").replace("\r", "").replace("\f", "")
         )
         if len(stripped) < 200 or meaningful_chars < 100:
             text = ocr_pdf_text(path)
@@ -168,21 +158,46 @@ def extract_first(text: str, patterns: list[str]) -> str:
 
 
 def extract_supplier(text: str) -> str:
-    company_suffixes = ["有限公司", "股份公司", "有限责任公司", "集团", "实业", "保洁服务部"]
+    """读『第一页乙方后字段』作为供应商（用户要求简化口径）。
+
+    流程：
+    1. 仅在第一页（\f 之前）文本内匹配，避免合同正文里多次出现的"乙方"行污染
+    2. 匹配到 "乙方/供应商/承包方/服务单位/乙方名称" 后的字段
+    3. 优先取含公司后缀的字段；只有"全是噪声且无公司名"的行才跳过
+    4. 去掉全角/半角括号里的括注（如"（盖xxx章）"），再截断到公司后缀白名单中的第一个
+    """
+    company_suffixes = [
+        "有限公司", "股份公司", "有限责任公司",
+        "集团", "实业",
+        "服务公司", "环境公司", "清洁公司",
+        "物业服务公司", "物业服务部", "保洁服务部",
+    ]
+    noise_keywords = [
+        "盖章", "地址", "地 址", "联系人", "电话", "开户行", "法定代表",
+        "授权代表", "邮编", "邮箱", "传真", "日期", "签名", "签字",
+    ]
+    first_page = text.split("\f", 1)[0] if "\f" in text else text
     patterns = [
         r"(?:乙方|供应商|承包方|服务单位|乙方名称)[:：\s]*([^\n\r，,。；;]{2,60})",
     ]
     for pattern in patterns:
-        for match in re.finditer(pattern, text):
+        for match in re.finditer(pattern, first_page):
             candidate = match.group(1).strip()
-            if any(suffix in candidate for suffix in company_suffixes):
-                for suffix in company_suffixes:
-                    if suffix in candidate:
-                        idx = candidate.index(suffix) + len(suffix)
-                        candidate = candidate[:idx]
-                        break
-                if 4 <= len(candidate) <= 40:
-                    return candidate
+            # 去掉全角/半角括号里的括注（如"（盖xxx章）"、"（签字）"），再去掉残留首部标点
+            candidate = re.sub(r"[（(][^）)]*[）)]", "", candidate).strip(" ：:—-、，,。")
+            has_company = any(suffix in candidate for suffix in company_suffixes)
+            has_noise = any(kw in candidate for kw in noise_keywords)
+            # 有公司名 → 直接走截断流程；无公司名但有噪声 → 跳过；无公司名也无噪声 → 走截断
+            if not has_company and has_noise:
+                continue
+            for suffix in company_suffixes:
+                if suffix in candidate:
+                    idx = candidate.index(suffix) + len(suffix)
+                    candidate = candidate[:idx]
+                    if 4 <= len(candidate) <= 40:
+                        return candidate
+                    break
+            # 没匹配到公司后缀但也没噪声 → 不返回（candidate 不是公司名）
     return ""
 
 

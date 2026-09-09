@@ -33,36 +33,6 @@ def _normalize_date_text(value: str) -> str:
     return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
 
 
-def _extract_date(text: str, label: str) -> str:
-    pattern = label + r"\s*[：:]?\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
-    m = re.search(pattern, text)
-    if m:
-        return f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"
-    pattern2 = label + r"\s*[：:]?\s*(\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2})"
-    m2 = re.search(pattern2, text)
-    if m2:
-        return _normalize_date_text(m2.group(1))
-    return ""
-
-
-def _extract_date_range(text: str) -> tuple[str, str]:
-    range_patterns = [
-        r"(?:自|从|起)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)\s*(?:起)?\s*(?:至|到|止)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)",
-        r"(?:自|从|起)\s*(\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2})\s*(?:起)?\s*(?:至|到|止)\s*(\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2})",
-        r"有效期(?:自|从|起)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日).{0,15}?(?:至|到|止)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)",
-        r"服务期(?:限)?(?:自|从)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日).{0,15}?(?:至|到|止)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)",
-        r"合同期(?:限)?(?:自|从)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日).{0,15}?(?:至|到|止)\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)",
-    ]
-    for pattern in range_patterns:
-        m = re.search(pattern, text)
-        if m:
-            start = _normalize_date_text(m.group(1))
-            end = _normalize_date_text(m.group(2))
-            if start and end:
-                return start, end
-    return "", ""
-
-
 def _cleanup_project_name(value: str) -> str:
     text = str(value or "").strip()
     if "考评" in text or "考核" in text:
@@ -183,6 +153,18 @@ def _extract_first_match_oneline(pattern: str, text: str, group: int = 1) -> str
     return _clean_formtext(m.group(group)) if m else ""
 
 
+def _extract_contract_period(text: str) -> tuple[str, str]:
+    """读『合同期限』这一行的两个日期（用户要求简化口径）。"""
+    m = re.search(r"合同期限[:：\s]*([^\n\r]{2,120})", text)
+    if not m:
+        return "", ""
+    line = m.group(1)
+    dates = re.findall(r"\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2}", line)
+    if len(dates) >= 2:
+        return _normalize_date_text(dates[0]), _normalize_date_text(dates[1])
+    return "", ""
+
+
 def _parse_metadata(text: str, original_name: str) -> dict:
     text_oneline = text.replace("\n", "")
 
@@ -236,40 +218,7 @@ def _parse_metadata(text: str, original_name: str) -> dict:
             business_type = kw
             break
 
-    start_date, end_date = _extract_date_range(text)
-
-    if not start_date:
-        start_date = _extract_date(text, "自")
-    if not end_date:
-        end_date = _extract_date(text, "至")
-
-    if not start_date:
-        for pat in [
-            r"(?:开始日期|合同开始|合同期自|服务期自|起止日期自|起始日期)\s*[：:]?\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
-            r"(?:开始日期|合同开始|合同期自|服务期自|起止日期自|起始日期)\s*[：:]?\s*(\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2})",
-            r"合同有效期[^自]*(?:自|从)\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
-        ]:
-            m = re.search(pat, text)
-            if m:
-                if m.lastindex == 3:
-                    start_date = f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"
-                else:
-                    start_date = _normalize_date_text(m.group(1))
-                break
-
-    if not end_date:
-        for pat in [
-            r"(?:结束日期|合同结束|合同期至|服务期至|起止日期至|终止日期)\s*[：:]?\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
-            r"(?:结束日期|合同结束|合同期至|服务期至|起止日期至|终止日期)\s*[：:]?\s*(\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2})",
-            r"合同有效期.*?(?:至|到)\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
-        ]:
-            m = re.search(pat, text)
-            if m:
-                if m.lastindex == 3:
-                    end_date = f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"
-                else:
-                    end_date = _normalize_date_text(m.group(1))
-                break
+    start_date, end_date = _extract_contract_period(text)
 
     return {
         "project_name": project_name,
