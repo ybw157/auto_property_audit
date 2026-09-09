@@ -107,7 +107,10 @@ def download_report(report_id: int):
     if not report:
         raise HTTPException(status_code=404, detail="报告不存在")
 
-    file_path = Path(report["file_path"])
+    raw_path = report["file_path"].replace("\\", "/")
+    file_path = Path(raw_path)
+    if not file_path.is_absolute():
+        file_path = settings.base_dir / file_path
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="报告文件不存在")
 

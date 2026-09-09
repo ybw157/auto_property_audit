@@ -101,7 +101,20 @@ export function BiSync() {
           </label>
           <label className="block">
             <span className="text-sm font-medium text-slate-700">审核月份</span>
-            <input className="input mt-2 w-full" type="month" value={auditMonth} onChange={(event) => setAuditMonth(event.target.value)} />
+            <select className="input mt-2 w-full" value={auditMonth} onChange={(event) => setAuditMonth(event.target.value)}>
+            <option value="">全部月份</option>
+            {(() => {
+              const now = new Date()
+              const opts: { value: string; label: string }[] = []
+              for (let i = 0; i < 12; i++) {
+                const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+                const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+                const label = `${d.getFullYear()}年${d.getMonth() + 1}月`
+                opts.push({ value, label })
+              }
+              return opts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)
+            })()}
+          </select>
           </label>
           <div className="flex items-end">
             <button className="btn-primary w-full" disabled={loading} onClick={loadRecords}>查询同步状态</button>

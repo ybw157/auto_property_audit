@@ -80,7 +80,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
       const conf = confs[dateStr]
       const rec = missingByDate.get(dateStr)
       const shift = rec ? `${rec.shift_start || ''}-${rec.shift_end || ''}` : ''
-      const clocks = rec ? (rec.clock_times || []).join(' / ') : ''
+      const clocks = rec ? (rec.clock_times || []).join('\n') : ''
       records.push({
         key: `missing|${d.employee_name}|${dateStr}`,
         employee_name: d.employee_name,
@@ -103,7 +103,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
       const missing = issue.missing || 0
       const meta = midByKey.get(`${dateStr}|${issue.window || ''}`)
       const shift = meta ? `${meta.shift_start || ''}-${meta.shift_end || ''}` : ''
-      const clocks = meta ? (meta.clock_times || []).join(' / ') : ''
+      const clocks = meta ? (meta.clock_times || []).join('\n') : ''
       records.push({
         key: confKey,
         employee_name: d.employee_name,
@@ -171,7 +171,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
       const amount = round2(dailyRate * multiplier)
       const rec = absenceByDate.get(dateStr)
       const shift = rec ? `${rec.shift_start || ''}-${rec.shift_end || ''}` : ''
-      const clocks = rec ? (rec.clock_times || []).join(' / ') : ''
+      const clocks = rec ? (rec.clock_times || []).join('\n') : ''
       records.push({
         key: confKey,
         employee_name: d.employee_name,
@@ -543,14 +543,14 @@ export function ConfirmationPage() {
                   <thead className="bg-slate-50">
                     <tr>
                       <th className="w-12 px-4 py-3 text-center font-medium text-slate-600">确认</th>
-                      <th className="w-28 px-4 py-3 text-left font-medium text-slate-600">日期</th>
+                      <th className="w-24 px-4 py-3 text-left font-medium text-slate-600">日期</th>
                       <th className="w-24 px-4 py-3 text-left font-medium text-slate-600">岗位</th>
-                      <th className="w-32 px-4 py-3 text-left font-medium text-slate-600">异常类型</th>
-                      <th className="w-36 px-4 py-3 text-left font-medium text-slate-600">规定考勤时间</th>
-                      <th className="w-44 px-4 py-3 text-left font-medium text-slate-600">实际BI打卡</th>
-                      <th className="px-4 py-3 text-left font-medium text-slate-600">异常说明</th>
-                      <th className="w-24 px-4 py-3 text-right font-medium text-slate-600">金额</th>
-                      <th className="w-28 px-4 py-3 text-center font-medium text-slate-600">是否免打卡</th>
+                      <th className="w-28 px-4 py-3 text-left font-medium text-slate-600">异常类型</th>
+                      <th className="w-32 px-4 py-3 text-left font-medium text-slate-600">规定考勤时间</th>
+                      <th className="w-36 px-4 py-3 text-left font-medium text-slate-600">实际BI打卡</th>
+                      <th className="min-w-56 px-4 py-3 text-left font-medium text-slate-600">异常说明</th>
+                      <th className="w-20 px-4 py-3 text-right font-medium text-slate-600">金额</th>
+                      <th className="w-24 px-4 py-3 text-center font-medium text-slate-600">是否免打卡</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
@@ -578,8 +578,8 @@ export function ConfirmationPage() {
                               {r.exception_label}
                             </span>
                           </td>
-                          <td className="px-4 py-3 text-xs text-slate-700">{r.shift_time || '—'}</td>
-                          <td className="px-4 py-3 text-xs text-slate-700">{r.clock_times || '—'}</td>
+                          <td className="px-4 py-3 text-xs text-slate-700 whitespace-nowrap">{r.shift_time || '—'}</td>
+                          <td className="px-4 py-3 text-xs text-slate-700 whitespace-pre-wrap">{r.clock_times || '—'}</td>
                           <td className="px-4 py-3 text-xs text-slate-500">{r.detail}</td>
                           <td className={`px-4 py-3 text-right font-medium ${free ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
                             ¥{r.amount.toFixed(2)}

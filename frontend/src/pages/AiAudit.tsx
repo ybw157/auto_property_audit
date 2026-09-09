@@ -14,6 +14,7 @@ type StartAuditResult = {
   version: number
   status: string
   slot_count: number
+  exception_count: number
   summary: Array<Record<string, unknown>>
 }
 
@@ -173,9 +174,9 @@ export function AiAudit() {
         body: JSON.stringify({ project_name: selectedProjectName, business_type: businessType, audit_month: auditMonthFormatted }),
       })
       setBatchId(result.version ?? null)
-      const summary = result.summary || []
-      const scheduleTaskCount = summary.reduce((s, it) => s + (Number(it.required_days) || 0), 0)
-      const exceptionCount = summary.filter((it) => (Number(it.shortage_days) || 0) > 0 || (Number(it.pending_days) || 0) > 0).length
+      // 统一口径：异常率 = 异常记录数 / 排班任务数
+      const scheduleTaskCount = result.slot_count || 0
+      const exceptionCount = result.exception_count || 0
       const exceptionRate = scheduleTaskCount > 0 ? ((exceptionCount / scheduleTaskCount) * 100).toFixed(1) : '0.0'
       setMessage(`审核完成：异常率 ${exceptionRate}%`)
       const ctx: AuditContext = { project_name: selectedProjectName, audit_month: auditMonthFormatted, business_type: businessType }

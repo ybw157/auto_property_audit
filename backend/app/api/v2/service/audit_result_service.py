@@ -288,6 +288,9 @@ def start_audit(
         version=new_version,
         results_json=json_dumps(audit_out),
         summary_json=json_dumps(audit_out["summary"]),
+        ai_analysis="",
+        versions_json="[]",
+        logs_json="[]",
         locked=0,
         confirmed_by="",
         confirmed_at="",
@@ -299,6 +302,21 @@ def start_audit(
     print(f"[审核完成] 总槽位数: {len(slot_details)}, 总扣款: {s04_summary.get('total_deduction', 0) if s04_rules else 0}")
     print(f"{'='*60}\n")
 
+    # 统一口径：
+    # 分子 = 异常记录数（个人考勤异常总条数：漏打卡+中间卡+迟到+早退+缺勤）
+    # 分母 = 排班任务数（slot_details 中排除休息/请假的条数）
+    s04_audit_data = audit_out.get("s04_attendance_audit") or {}
+    deduction_details_list = s04_audit_data.get("deduction_details", []) if isinstance(s04_audit_data, dict) else []
+    exception_count = sum(
+        len(d.get("missing_clock_dates", [])) +
+        len(d.get("mid_clock_issues", [])) +
+        len(d.get("late_details", [])) +
+        len(d.get("early_leave_details", [])) +
+        len(d.get("absence_dates", []))
+        for d in deduction_details_list
+    )
+    schedule_task_count = sum(1 for d in slot_details if d.get("status") not in ("休息", "请假"))
+
     return Result.ok(
         {
             "project_name": project_name,
@@ -306,7 +324,8 @@ def start_audit(
             "audit_month": audit_month,
             "version": new_version,
             "status": "已审核",
-            "slot_count": len(audit_out["slot_details"]),
+            "slot_count": schedule_task_count,
+            "exception_count": exception_count,
             "summary": audit_out["summary"],
         },
         message="审核完成",
@@ -589,16 +608,11 @@ def finalize_audit(
         "confirmed_by": confirmed_by,
     }
 
-    # 异常率计算（沿用旧仓库口径：异常条数 / 排班任务数 × 100）
-    # 旧仓库 denominator 为 schedule_task_count（排班任务数）；现数据结构未保存全量考勤行，
-    # 故以 summary 中各岗位 required_days 汇总作为排班任务数（与核心指标表口径一致）。
-    slot_summary = data.get("summary", [])
-    if isinstance(slot_summary, list):
-        schedule_task_count = sum(item.get("required_days", 0) for item in slot_summary)
-    elif isinstance(slot_summary, dict):
-        schedule_task_count = int(slot_summary.get("schedule_task_count", 0) or 0)
-    else:
-        schedule_task_count = 0
+    # 异常率计算（统一口径：异常记录数 / 排班任务数 × 100）
+    # 分子 = 异常记录数（个人考勤异常总条数：漏打卡+中间卡+迟到+早退+缺勤）
+    # 分母 = 排班任务数（slot_details 中排除休息/请假的条数）
+    slot_details_list = data.get("slot_details", []) if isinstance(data.get("slot_details"), list) else []
+    schedule_task_count = sum(1 for d in slot_details_list if d.get("status") not in ("休息", "请假"))
 
     exception_count = 0
     confirmed_count = 0
@@ -616,8 +630,8 @@ def finalize_audit(
             keys.append(f"early|{emp_name}|{early.get('date', '')}")
         for date_str in detail.get("absence_dates", []):
             keys.append(f"absence|{emp_name}|{date_str}")
+        exception_count += len(keys)
         for key in keys:
-            exception_count += 1
             conf = confirmations.get(key, {})
             if conf.get("confirmed", False) and not conf.get("free_deduction", False):
                 confirmed_count += 1
