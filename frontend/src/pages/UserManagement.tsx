@@ -5,7 +5,7 @@ import { request } from '../services/api'
 type User = {
   id: number
   username: string
-  role: string
+  role: boolean
   display_name: string
   project_name: string
   project_code: string
@@ -24,27 +24,23 @@ export function UserManagement() {
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
 
-  // 创建用户表单
   const [showCreate, setShowCreate] = useState(false)
   const [createForm, setCreateForm] = useState({
     username: '',
     password: '',
     display_name: '',
-    role: '项目账号',
+    role: 'project_user',
     project_name: '',
   })
   const [creating, setCreating] = useState(false)
 
-  // 重置密码
   const [resetTarget, setResetTarget] = useState<User | null>(null)
   const [newPassword, setNewPassword] = useState('')
   const [resetting, setResetting] = useState(false)
 
-  // 批量生成
   const [batchResult, setBatchResult] = useState<CreatedAccount[] | null>(null)
   const [batching, setBatching] = useState(false)
   const [copied, setCopied] = useState<string | null>(null)
-  // 查看/重新生成所有项目账号密码
   const [regenerating, setRegenerating] = useState(false)
 
   useEffect(() => {
@@ -55,7 +51,7 @@ export function UserManagement() {
   async function loadUsers() {
     setLoading(true)
     try {
-      const rows = await request<User[]>('/api/v1/auth/users')
+      const rows = await request<User[]>('/api/v2/user/users')
       setUsers(rows)
       setMessage(`共 ${rows.length} 个账号`)
     } catch (err: any) {
@@ -67,8 +63,16 @@ export function UserManagement() {
 
   async function loadProjects() {
     try {
-      const rows = await request<Project[]>('/api/v1/projects')
-      setProjects(rows)
+      const contracts = await request<any[]>('/api/v2/contracts')
+      const seen = new Set<string>()
+      const list: Project[] = []
+      for (const c of contracts) {
+        if (c.project_name && !seen.has(c.project_name)) {
+          seen.add(c.project_name)
+          list.push({ project_name: c.project_name, project_code: c.project_code || '' })
+        }
+      }
+      setProjects(list)
     } catch {
       setProjects([])
     }
@@ -79,14 +83,15 @@ export function UserManagement() {
     if (createForm.password.length < 6) return setMessage('密码至少 6 位')
     setCreating(true)
     try {
+      // TODO: V2用户创建接口待后端提供
       await request('/api/v1/auth/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(createForm),
+        body: JSON.stringify({ ...createForm, role: createForm.role === 'group_admin' }),
       })
       setMessage(`用户 ${createForm.username} 创建成功`)
       setShowCreate(false)
-      setCreateForm({ username: '', password: '', display_name: '', role: '项目账号', project_name: '' })
+      setCreateForm({ username: '', password: '', display_name: '', role: 'project_user', project_name: '' })
       await loadUsers()
     } catch (err: any) {
       setMessage(err.message || '创建失败')
@@ -100,6 +105,7 @@ export function UserManagement() {
     if (newPassword.length < 6) return setMessage('新密码至少 6 位')
     setResetting(true)
     try {
+      // TODO: V2 change-password需要old_password，管理员重置场景待后端支持
       await request(`/api/v1/auth/users/${resetTarget.id}/password`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -118,6 +124,7 @@ export function UserManagement() {
   async function handleDelete(user: User) {
     if (!confirm(`确认删除用户「${user.display_name || user.username}」？此操作不可撤销。`)) return
     try {
+      // TODO: V2用户删除接口待后端提供
       await request(`/api/v1/auth/users/${user.id}`, { method: 'DELETE' })
       setMessage(`用户 ${user.username} 已删除`)
       await loadUsers()
@@ -130,6 +137,7 @@ export function UserManagement() {
     if (!confirm('将为所有未创建账号的项目批量生成项目账号，确认继续？')) return
     setBatching(true)
     try {
+      // TODO: V2批量创建接口待后端提供
       const data = await request<{ created: CreatedAccount[]; count: number; message: string }>(
         '/api/v1/auth/users/batch-projects',
         { method: 'POST' },
@@ -148,6 +156,7 @@ export function UserManagement() {
     if (!confirm('将重新生成所有项目账号的密码（旧密码失效），并在页面显示新密码。确认继续？')) return
     setRegenerating(true)
     try {
+      // TODO: V2重新生成密码接口待后端提供
       const data = await request<{ accounts: CreatedAccount[]; count: number; message: string }>(
         '/api/v1/auth/users/regenerate-passwords',
         { method: 'POST' },
@@ -164,11 +173,9 @@ export function UserManagement() {
 
   async function copyToClipboard(text: string, key: string) {
     try {
-      // 优先使用 Clipboard API（HTTPS 或 localhost 下可用）
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text)
       } else {
-        // HTTP 环境降级：用临时 textarea + execCommand
         const ta = document.createElement('textarea')
         ta.value = text
         ta.style.position = 'fixed'
@@ -184,7 +191,6 @@ export function UserManagement() {
       setCopied(key)
       setTimeout(() => setCopied(null), 1500)
     } catch {
-      // 最终降级：提示用户手动复制
       const ta = document.createElement('textarea')
       ta.value = text
       ta.style.position = 'fixed'
@@ -208,14 +214,14 @@ export function UserManagement() {
     copyToClipboard(text, 'all')
   }
 
-  const roleBadge = (role: string) =>
-    role === '集团管理员'
+  const roleLabel = (role: boolean) => role ? '集团管理员' : '项目账号'
+  const roleBadge = (role: boolean) =>
+    role
       ? 'bg-purple-100 text-purple-700'
       : 'bg-blue-100 text-blue-700'
 
   return (
     <div className="space-y-6">
-      {/* 操作栏 */}
       <div className="card p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
@@ -262,7 +268,6 @@ export function UserManagement() {
           </div>
         </div>
 
-        {/* 统计 */}
         <div className="mt-5 grid grid-cols-3 gap-4">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <div className="text-sm text-slate-500">总账号数</div>
@@ -271,13 +276,13 @@ export function UserManagement() {
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <div className="text-sm text-slate-500">集团管理员</div>
             <div className="mt-1 text-2xl font-semibold text-slate-950">
-              {users.filter((u) => u.role === '集团管理员').length}
+              {users.filter((u) => u.role === true).length}
             </div>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <div className="text-sm text-slate-500">项目账号</div>
             <div className="mt-1 text-2xl font-semibold text-slate-950">
-              {users.filter((u) => u.role === '项目账号').length}
+              {users.filter((u) => u.role === false).length}
             </div>
           </div>
         </div>
@@ -287,7 +292,6 @@ export function UserManagement() {
         )}
       </div>
 
-      {/* 新建用户表单 */}
       {showCreate && (
         <div className="card p-6">
           <div className="flex items-center justify-between">
@@ -331,11 +335,11 @@ export function UserManagement() {
                 value={createForm.role}
                 onChange={(e) => setCreateForm({ ...createForm, role: e.target.value })}
               >
-                <option value="项目账号">项目账号</option>
-                <option value="集团管理员">集团管理员</option>
+                <option value="project_user">项目账号</option>
+                <option value="group_admin">集团管理员</option>
               </select>
             </label>
-            {createForm.role === '项目账号' && (
+            {createForm.role === 'project_user' && (
               <label className="block col-span-2">
                 <span className="text-sm font-medium text-slate-700">绑定项目</span>
                 <select
@@ -364,7 +368,6 @@ export function UserManagement() {
         </div>
       )}
 
-      {/* 批量生成结果 */}
       {batchResult && (
         <div className="card p-6">
           <div className="flex items-center justify-between">
@@ -424,7 +427,6 @@ export function UserManagement() {
         </div>
       )}
 
-      {/* 用户列表 */}
       <div className="card p-6">
         <div className="flex items-center justify-between">
           <h3 className="text-base font-semibold">账号列表</h3>
@@ -450,7 +452,7 @@ export function UserManagement() {
                   <td className="px-4 py-2 text-slate-600">{u.display_name || u.username}</td>
                   <td className="px-4 py-2">
                     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${roleBadge(u.role)}`}>
-                      {u.role}
+                      {roleLabel(u.role)}
                     </span>
                   </td>
                   <td className="px-4 py-2 text-slate-600">{u.project_name || '—'}</td>
@@ -499,7 +501,6 @@ export function UserManagement() {
         </div>
       </div>
 
-      {/* 重置密码弹窗 */}
       {resetTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="card w-96 p-6">

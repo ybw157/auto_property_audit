@@ -1,3 +1,15 @@
+# ============================================================
+# 系统级依赖（需单独安装，不可通过 pip 安装）
+# ============================================================
+# Tesseract OCR — 用于扫描件 / 图片型 PDF 的文字识别
+#   Windows: 下载 https://github.com/UB-Mannheim/tesseract/wiki
+#            安装时勾选 "Chinese simplified (chi_sim)" 语言包
+#            默认安装路径: C:\Program Files\Tesseract-OCR\
+#   Linux:   sudo apt install tesseract-ocr tesseract-ocr-chi-sim
+#   macOS:   brew install tesseract tesseract-lang
+#   验证:    tesseract --version
+# ============================================================
+
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
 python-multipart==0.0.19
@@ -7,3 +19,15 @@ pydantic==2.10.4
 pypdf>=4.0.0
 pypdfium2>=4.0.0
 pytesseract>=0.3.10
+PyMuPDF>=1.23.0
+sqlalchemy>=2.0.0
+pymysql>=1.1.0
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+python-dotenv>=1.0.0
+olefile>=0.47
+python-docx>=1.0.0
+selenium>=4.0.0
+webdriver-manager>=4.0.0

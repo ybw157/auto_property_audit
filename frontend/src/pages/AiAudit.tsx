@@ -1,21 +1,29 @@
 import { DragEvent, ChangeEvent, useEffect, useState } from 'react'
 import { request } from '../services/api'
+import type { AuditContext } from '../types'
+import { useAuth } from '../hooks/useAuth'
+import { useAuditContext } from '../hooks/useAuditContext'
 
-type Props = { onBatchChange: (id: number) => void; currentBatchId?: number | null; userRole?: string; projectName?: string }
 type FileKind = 'project'
-type ValidateResult = {
-  valid: boolean
-  message: string
-  missing_sheets?: string[]
-}
 type MasterProject = { project_name: string; project_code: string }
 
-export function AiAudit({ onBatchChange, currentBatchId, userRole = '集团管理员', projectName = '' }: Props) {
-  const currentRole = userRole
-  const currentProjectName = projectName
-  const isProjectAccount = currentRole === '项目账号'
+type StartAuditResult = {
+  project_name: string
+  business_type: string
+  audit_month: string
+  version: number
+  status: string
+  slot_count: number
+  summary: Array<Record<string, unknown>>
+}
+
+export function AiAudit() {
+  const { role: currentRole, projectName: currentProjectName } = useAuth()
+  const { setAuditContext } = useAuditContext()
+  const isProjectAccount = currentRole === 'project_user'
   const [projectFile, setProjectFile] = useState<File | null>(null)
   const [projects, setProjects] = useState<MasterProject[]>([])
+  const [businessTypeMapping, setBusinessTypeMapping] = useState<Record<string, string[]>>({})
   const [selectedProjectName, setSelectedProjectName] = useState(isProjectAccount ? currentProjectName : '')
   const [auditMonth, setAuditMonth] = useState(() => {
     const now = new Date()
@@ -24,21 +32,42 @@ export function AiAudit({ onBatchChange, currentBatchId, userRole = '集团管�
     return `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`
   })
   const [businessType, setBusinessType] = useState('')
-  const [batchId, setBatchId] = useState<number | null>(currentBatchId ?? null)
+  const [batchId, setBatchId] = useState<number | null>(null)
   const [message, setMessage] = useState('请上传项目基础资料后开始审核，BI考勤由系统自动读取BI_Data目录')
   const [loading, setLoading] = useState(false)
   const [dragging, setDragging] = useState<FileKind | 'all' | null>(null)
 
   useEffect(() => {
-    request<MasterProject[]>('/api/v1/projects').then((items) => {
-      setProjects(items)
+    request<Array<{ project_name: string; project_code: string; business_type: string }>>('/api/v2/contracts').then((items) => {
+      const seen = new Map<string, MasterProject>()
+      for (const item of items) {
+        if (!seen.has(item.project_name)) seen.set(item.project_name, { project_name: item.project_name, project_code: item.project_code })
+      }
+      const unique = Array.from(seen.values())
+      setProjects(unique)
       if (isProjectAccount && currentProjectName) {
         setSelectedProjectName(currentProjectName)
-      } else if (items.length && !selectedProjectName) {
-        setSelectedProjectName(items[0].project_name)
+      } else if (unique.length && !selectedProjectName) {
+        setSelectedProjectName(unique[0].project_name)
       }
     }).catch(() => setProjects([]))
   }, [currentRole, currentProjectName])
+
+  useEffect(() => {
+    request<{ projects: string[]; mapping: Record<string, string[]> }>('/api/v2/business-types')
+      .then((data) => setBusinessTypeMapping(data.mapping || {}))
+      .catch(() => {})
+  }, [])
+
+  // 业态随登录项目自动映射：项目唯一业态直接选中，无业态或无映射时清空为“全部业态”
+  useEffect(() => {
+    const mapped = businessTypeMapping[selectedProjectName] || []
+    if (mapped.length === 0) {
+      setBusinessType('')
+    } else if (mapped.length === 1) {
+      setBusinessType(mapped[0])
+    }
+  }, [selectedProjectName, businessTypeMapping])
 
   function isExcel(file: File) {
     return file.name.toLowerCase().endsWith('.xlsx')
@@ -50,10 +79,18 @@ export function AiAudit({ onBatchChange, currentBatchId, userRole = '集团管�
     setLoading(true)
     try {
       const form = new FormData()
-      form.append('project_file', projectFile)
-      await request(`/api/v1/audit-batches/${batchId}/resubmit-schedule`, { method: 'POST', body: form })
-      setMessage(`排班已重新提交，批次 ${batchId} 状态已改为待重新审核。集团管理员可重新点击开始AI审核。`)
-      onBatchChange(batchId)
+      form.append('file', projectFile)
+      await request('/api/v2/positions/upload', { method: 'POST', body: form })
+      const auditMonthFormatted = auditMonth.replace('-', '')
+      const result = await request<StartAuditResult>('/api/v2/audit-results/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_name: selectedProjectName, business_type: businessType, audit_month: auditMonthFormatted }),
+      })
+      setBatchId(result.version ?? null)
+      setMessage(`排班已重新提交，批次 ${result.version} 状态已改为待重新审核。集团管理员可重新点击开始AI审核。`)
+      const ctx: AuditContext = { project_name: selectedProjectName, audit_month: auditMonthFormatted, business_type: businessType }
+      setAuditContext(ctx)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '重新提交失败')
     } finally {
@@ -126,67 +163,28 @@ export function AiAudit({ onBatchChange, currentBatchId, userRole = '集团管�
     if (!projectFile) return setMessage('请先选择项目基础资料')
     setLoading(true)
     try {
-      const selectedProject = projects.find((item) => item.project_name === selectedProjectName)
-      const batch = await request<{ id: number }>('/api/v1/audit-batches', {
+      const form = new FormData()
+      form.append('file', projectFile)
+      await request('/api/v2/positions/upload', { method: 'POST', body: form })
+      const auditMonthFormatted = auditMonth.replace('-', '')
+      const result = await request<StartAuditResult>('/api/v2/audit-results/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_name: selectedProjectName, project_code: selectedProject?.project_code ?? '', audit_month: auditMonth, business_type: businessType }),
+        body: JSON.stringify({ project_name: selectedProjectName, business_type: businessType, audit_month: auditMonthFormatted }),
       })
-      const form = new FormData()
-      form.append('project_file', projectFile)
-      await request(`/api/v1/audit-batches/${batch.id}/upload-project-base`, { method: 'POST', body: form })
-      const validateResult = await request<ValidateResult>(`/api/v1/audit-batches/${batch.id}/validate`, { method: 'POST' })
-      if (!validateResult.valid) {
-        setBatchId(batch.id)
-        onBatchChange(batch.id)
-        setMessage(`模板校验失败：${validateResult.message}。请确认左侧上传的是项目基础资料，且包含项目基础信息/项目基础表、合同编制表/保洁人员实际在岗编制表、月度排班表。`)
-        return
-      }
-      // 提交异步审核任务
-      await request(`/api/v1/audit-batches/${batch.id}/start`, { method: 'POST' })
-      setBatchId(batch.id)
-      onBatchChange(batch.id)
-      setMessage('审核已提交，正在后台执行...')
-      // 轮询审核进度
-      const result = await pollAuditProgress(batch.id)
-      if (result) {
-        const scheduleCount = result.summary.schedule_task_count as number || 0
-        const exceptionCount = result.summary.exception_count as number || 0
-        const exceptionRate = scheduleCount > 0 ? ((exceptionCount / scheduleCount) * 100).toFixed(1) : '0.0'
-        setMessage(`审核完成：异常率 ${exceptionRate}%`)
-      }
+      setBatchId(result.version ?? null)
+      const summary = result.summary || []
+      const scheduleTaskCount = summary.reduce((s, it) => s + (Number(it.required_days) || 0), 0)
+      const exceptionCount = summary.filter((it) => (Number(it.shortage_days) || 0) > 0 || (Number(it.pending_days) || 0) > 0).length
+      const exceptionRate = scheduleTaskCount > 0 ? ((exceptionCount / scheduleTaskCount) * 100).toFixed(1) : '0.0'
+      setMessage(`审核完成：异常率 ${exceptionRate}%`)
+      const ctx: AuditContext = { project_name: selectedProjectName, audit_month: auditMonthFormatted, business_type: businessType }
+      setAuditContext(ctx)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '审核失败')
     } finally {
       setLoading(false)
     }
-  }
-
-  async function pollAuditProgress(batchId: number): Promise<{ summary: Record<string, unknown> } | null> {
-    const maxAttempts = 120 // 最多轮询120次（约2分钟）
-    for (let i = 0; i < maxAttempts; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 1000)) // 每秒轮询一次
-      try {
-        const progress = await request<{ status: string; progress: number; message: string }>(`/api/v1/audit-batches/${batchId}/progress`)
-        if (progress.status === '审核完成') {
-          // 获取完整结果
-          const batch = await request<{ summary: Record<string, unknown> }>(`/api/v1/audit-batches/${batchId}`)
-          return { summary: batch.summary as Record<string, unknown> || {} }
-        }
-        if (progress.status === '审核失败') {
-          throw new Error(progress.message || '审核失败')
-        }
-        // 仍在审核中，继续轮询
-        setMessage(`审核中... ${progress.message || ''}`)
-      } catch (error) {
-        if (error instanceof Error && error.message !== '审核失败') {
-          // 网络错误等，继续重试
-          continue
-        }
-        throw error
-      }
-    }
-    throw new Error('审核超时，请稍后刷新查看结果')
   }
 
   return (
@@ -242,12 +240,9 @@ export function AiAudit({ onBatchChange, currentBatchId, userRole = '集团管�
             <label className="block text-sm font-medium text-slate-700">选择审核业态</label>
             <select className="input mt-2 w-full" value={businessType} onChange={(event) => setBusinessType(event.target.value)}>
               <option value="">全部业态</option>
-              <option value="住宅">住宅</option>
-              <option value="商业">商业</option>
-              <option value="外场">物业</option>
-              <option value="酒店">酒店</option>
-              <option value="街区">街区</option>
-              <option value="写字楼">写字楼</option>
+              {(businessTypeMapping[selectedProjectName] || []).map((bt) => (
+                <option key={bt} value={bt}>{bt}</option>
+              ))}
             </select>
             <p className="mt-2 text-xs text-slate-500">不同业态对应不同合同。选择后仅审核该业态的排班和考勤。</p>
           </div>
@@ -267,7 +262,7 @@ export function AiAudit({ onBatchChange, currentBatchId, userRole = '集团管�
         <div className="mt-6 flex items-center gap-3">
           <button className="btn-primary" disabled={loading} onClick={createAndUpload}>{loading ? '审核中...' : '开始AI审核'}</button>
           <button className="btn-secondary" disabled={loading || !batchId} onClick={resubmitSchedule}>重新提交排班</button>
-          <a className="btn-secondary" href="http://localhost:8000/api/v1/templates/download/project_base">下载项目模板</a>
+          <a className="btn-secondary" href="http://localhost:8000/api/v2/templates/project_base">下载项目模板</a>
         </div>
       </div>
       <div className="card p-6">

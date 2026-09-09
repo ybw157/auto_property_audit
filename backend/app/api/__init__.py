@@ -1,0 +1,1 @@
+"""API 层 — v1 为扁平化路由，v2 为 Spring Boot + MVC 分层架构。"""

@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { request } from '../services/api'
+import { useAuth } from '../hooks/useAuth'
 
 type Detail = {
-  batch_id: number
   project_name: string
   business_type: string
   audit_month: string
@@ -27,20 +27,15 @@ type Summary = {
   project_name?: string
 }
 
-type Props = {
-  userRole?: string
-  projectName?: string
-}
-
-export function Dashboard({ userRole = '集团管理员', projectName = '' }: Props) {
+export function Dashboard() {
+  const { role, projectName } = useAuth()
   const [summary, setSummary] = useState<Summary | null>(null)
-  const isProjectAccount = userRole === '项目账号'
+  const isProjectAccount = role === 'project_user'
 
   useEffect(() => {
     request<Summary>('/api/v1/dashboard/summary').then(setSummary).catch(() => setSummary(null))
-  }, [userRole, projectName])
+  }, [role, projectName])
 
-  // 项目账号：展示本项目确认的最终版明细
   if (isProjectAccount) {
     const details = summary?.details ?? []
     const cards = [
@@ -86,7 +81,7 @@ export function Dashboard({ userRole = '集团管理员', projectName = '' }: Pr
               </thead>
               <tbody>
                 {details.map((d) => (
-                  <tr key={d.batch_id} className="border-t border-slate-100 hover:bg-slate-50">
+                  <tr key={`${d.project_name}-${d.business_type}-${d.audit_month}`} className="border-t border-slate-100 hover:bg-slate-50">
                     <td className="px-4 py-2 font-medium text-slate-800">{d.audit_month || '-'}</td>
                     <td className="px-4 py-2 text-slate-600">{d.business_type || '-'}</td>
                     <td className="px-4 py-2 text-center text-slate-600">{d.schedule_count}</td>
@@ -120,7 +115,6 @@ export function Dashboard({ userRole = '集团管理员', projectName = '' }: Pr
     )
   }
 
-  // 集团管理员：保持原有汇总视图
   const cards = [
     ['已确认最终版', summary?.monthly_project_count ?? 0],
     ['过程版本不计入', '仅统计最终版'],
@@ -167,7 +161,7 @@ export function Dashboard({ userRole = '集团管理员', projectName = '' }: Pr
               </thead>
               <tbody>
                 {summary.details.map((d) => (
-                  <tr key={d.batch_id} className="border-t border-slate-100 hover:bg-slate-50">
+                  <tr key={`${d.project_name}-${d.business_type}-${d.audit_month}`} className="border-t border-slate-100 hover:bg-slate-50">
                     <td className="px-4 py-2 font-medium text-slate-800">{d.project_name}</td>
                     <td className="px-4 py-2 text-slate-600">{d.audit_month || '-'}</td>
                     <td className="px-4 py-2 text-slate-600">{d.business_type || '-'}</td>

@@ -26,7 +26,16 @@ export function BiSync() {
   const [message, setMessage] = useState('')
 
   useEffect(() => {
-    request<MasterProject[]>('/api/v1/projects').then(setProjects).catch(() => setProjects([]))
+    request<any[]>('/api/v2/contracts').then((rows) => {
+      const seen = new Set<string>()
+      const list: MasterProject[] = []
+      for (const r of rows) {
+        if (!r.project_name || seen.has(r.project_name)) continue
+        seen.add(r.project_name)
+        list.push({ project_name: r.project_name, project_code: r.project_code || '' })
+      }
+      setProjects(list)
+    }).catch(() => setProjects([]))
     loadRecords()
   }, [])
 

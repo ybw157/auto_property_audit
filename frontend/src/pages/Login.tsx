@@ -1,20 +1,17 @@
 import { useState, type FormEvent } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { ShieldCheck, Loader2 } from 'lucide-react'
 import { request } from '../services/api'
+import { useAuth } from '../hooks/useAuth'
+import type { LoginUser } from '../types'
 
-type LoginUser = {
-  username: string
-  role: string
-  display_name: string
-  project_name: string
-  project_code: string
-}
-
-export function Login({ onSuccess }: { onSuccess: (token: string, user: LoginUser) => void }) {
+export function Login() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const { login } = useAuth()
+  const navigate = useNavigate()
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -25,12 +22,13 @@ export function Login({ onSuccess }: { onSuccess: (token: string, user: LoginUse
     setLoading(true)
     setError('')
     try {
-      const data = await request<{ token: string; user: LoginUser }>('/api/v1/auth/login', {
+      const data = await request<{ token: string; user: LoginUser }>('/api/v2/user/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim(), password }),
       })
-      onSuccess(data.token, data.user)
+      login(data.token, data.user)
+      navigate('/audit', { replace: true })
     } catch (err: any) {
       setError(err.message || '登录失败，请检查用户名和密码')
     } finally {
@@ -80,11 +78,6 @@ export function Login({ onSuccess }: { onSuccess: (token: string, user: LoginUse
             {loading && <Loader2 size={16} className="animate-spin" />}
             {loading ? '登录中…' : '登录'}
           </button>
-          <div className="rounded-xl bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500">
-            默认账号：group_admin / admin123（集团管理员）
-            <br />
-            project_user / proj123（项目账号）
-          </div>
         </form>
       </div>
     </div>

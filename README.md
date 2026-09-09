@@ -25,6 +25,31 @@
 | PDF | ReportLab |
 | 审核逻辑 | Rule Engine |
 
+## 系统依赖
+
+本项目的 PDF 合同解析功能依赖 **Tesseract OCR**（用于扫描件 / 图片型 PDF 的文字识别）。Python 包 `pytesseract` 已在 requirements.txt 中列出，但 Tesseract 二进制程序需要单独安装。
+
+### Windows
+
+1. 从 https://github.com/UB-Mannheim/tesseract/wiki 下载安装包
+2. 安装时勾选 **Chinese simplified (chi_sim)** 语言包
+3. 默认安装路径：`C:\Program Files\Tesseract-OCR\`（代码会自动检测该路径）
+
+### Linux (Ubuntu/Debian)
+
+```bash
+sudo apt update
+sudo apt install tesseract-ocr tesseract-ocr-chi-sim
+```
+
+### macOS
+
+```bash
+brew install tesseract tesseract-lang
+```
+
+> 安装完成后可用 `tesseract --version` 验证是否成功。
+
 ## 启动后端
 
 ```bash
