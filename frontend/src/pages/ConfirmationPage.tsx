@@ -13,7 +13,7 @@ interface DeductionDetail {
   missing_clock_deductible: number
   missing_clock_amount: number
   missing_clock_dates: string[]
-  missing_clock_records?: Array<{ date: string; shift_start: string; shift_end: string; clock_times: string[] }>
+  missing_clock_records?: Array<{ date: string; position?: string; shift_start: string; shift_end: string; clock_times: string[] }>
   missing_clock_extra: number
   late_details: any[]
   late_total: number
@@ -21,7 +21,7 @@ interface DeductionDetail {
   early_leave_total: number
   mid_clock_issues: any[]
   absence_dates: string[]
-  absence_records?: Array<{ date: string; shift_start: string; shift_end: string; clock_times: string[] }>
+  absence_records?: Array<{ date: string; position?: string; shift_start: string; shift_end: string; clock_times: string[] }>
   absence_amount: number
   absence_daily_rate: number
   absence_multiplier?: number
@@ -33,6 +33,7 @@ interface ExceptionRecord {
   key: string
   employee_name: string
   work_date: string
+  position: string
   exception_type: string
   exception_label: string
   amount: number
@@ -69,7 +70,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
     for (const r of d.absence_records || []) {
       absenceByDate.set(r.date, r)
     }
-    const midByKey = new Map<string, { shift_start: string; shift_end: string; clock_times: string[] }>()
+    const midByKey = new Map<string, { position?: string; shift_start: string; shift_end: string; clock_times: string[] }>()
     for (const m of d.mid_clock_issues || []) {
       if (m.date) {
         midByKey.set(`${m.date}|${m.window || ''}`, m)
@@ -85,6 +86,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
         key: `missing|${d.employee_name}|${dateStr}`,
         employee_name: d.employee_name,
         work_date: dateStr,
+        position: rec?.position || d.position,
         exception_type: 'missing_clock',
         exception_label: '漏打卡',
         amount: 50,
@@ -108,6 +110,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
         key: confKey,
         employee_name: d.employee_name,
         work_date: dateStr,
+        position: meta?.position || issue.position || d.position,
         exception_type: 'mid_clock',
         exception_label: '中间卡缺失',
         amount: missing * 50,
@@ -125,11 +128,12 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
       const conf = confs[confKey]
       const tierLabel = late.tier === 'S04-2' ? '迟到≤30min' : late.tier === 'S04-3' ? '迟到30-60min' : '迟到>60min(转缺勤)'
       const shift = late.shift_start ? `${late.shift_start}-${late.shift_end || ''}` : ''
-      const clocks = late.clock_in ? String(late.clock_in) : ''
+      const clocks = (late.clock_times && late.clock_times.length > 0) ? late.clock_times.join('\n') : (late.clock_in ? String(late.clock_in) : '')
       records.push({
         key: confKey,
         employee_name: d.employee_name,
         work_date: dateStr,
+        position: late.position || d.position,
         exception_type: 'late',
         exception_label: '迟到',
         amount: late.amount || 0,
@@ -147,11 +151,12 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
       const conf = confs[confKey]
       const tierLabel = early.tier === 'S04-2' ? '早退≤30min' : early.tier === 'S04-3' ? '早退30-60min' : '早退>60min(转漏打卡)'
       const shift = early.shift_start ? `${early.shift_start}-${early.shift_end || ''}` : ''
-      const clocks = early.clock_out ? String(early.clock_out) : ''
+      const clocks = (early.clock_times && early.clock_times.length > 0) ? early.clock_times.join('\n') : (early.clock_out ? String(early.clock_out) : '')
       records.push({
         key: confKey,
         employee_name: d.employee_name,
         work_date: dateStr,
+        position: early.position || d.position,
         exception_type: 'early_leave',
         exception_label: '早退',
         amount: early.amount || 0,
@@ -176,6 +181,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
         key: confKey,
         employee_name: d.employee_name,
         work_date: dateStr,
+        position: rec?.position || d.position,
         exception_type: 'absence',
         exception_label: '脱岗/缺勤',
         amount,
@@ -188,6 +194,8 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
       })
     }
   }
+  // 按日期升序排序（1→30）
+  records.sort((a, b) => (a.work_date || '').localeCompare(b.work_date || ''))
   return records
 }
 
@@ -230,9 +238,13 @@ export function ConfirmationPage() {
 
   useEffect(() => {
     if (s04Data && s04Data.deduction_details.length && !selectedEmployee) {
-      setSelectedEmployee(s04Data.deduction_details[0].employee_name)
+      const empSet = new Set(allRecords.map(r => r.employee_name))
+      const firstWithRecords = s04Data.deduction_details.find(d => empSet.has(d.employee_name))
+      if (firstWithRecords) {
+        setSelectedEmployee(firstWithRecords.employee_name)
+      }
     }
-  }, [s04Data])
+  }, [s04Data, allRecords])
 
   async function loadData() {
     if (!auditContext) return
@@ -390,12 +402,14 @@ export function ConfirmationPage() {
   if (loading) return <div className="text-slate-500">加载中...</div>
   if (!s04Data || !s04Data.deduction_details.length) return <div className="card p-8 text-center text-slate-500">本次审核无异常记录</div>
 
-  const employeeList = s04Data.deduction_details.map(d => d.employee_name)
   const empRecordsMap: Record<string, ExceptionRecord[]> = {}
   for (const r of allRecords) {
     if (!empRecordsMap[r.employee_name]) empRecordsMap[r.employee_name] = []
     empRecordsMap[r.employee_name].push(r)
   }
+  const employeeList = s04Data.deduction_details
+    .map(d => d.employee_name)
+    .filter(name => empRecordsMap[name] && empRecordsMap[name].length > 0)
 
   const currentRecords = selectedEmployee ? (empRecordsMap[selectedEmployee] || []) : []
   const totalExceptions = allRecords.length
@@ -572,7 +586,7 @@ export function ConfirmationPage() {
                             />
                           </td>
                           <td className="px-4 py-3 text-slate-700">{r.work_date}</td>
-                          <td className="px-4 py-3 text-slate-700">{currentDetail.position}</td>
+                          <td className="px-4 py-3 text-slate-700">{r.position}</td>
                           <td className="px-4 py-3">
                             <span className={`inline-block rounded-full px-2 py-1 text-xs font-medium ${exceptionBadgeClass(r.exception_type)}`}>
                               {r.exception_label}

@@ -10,7 +10,30 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import Any
+
+
+def _detect_cross_midnight(start: str, end: str) -> bool:
+    """根据班次时间自动检测是否跨天：结束 <= 开始 → 跨天。"""
+    if not start or not end:
+        return False
+    def _to_min(t):
+        m = re.match(r"(\d{1,2}):(\d{2})", str(t).strip())
+        return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+    s, e = _to_min(start), _to_min(end)
+    if s is None or e is None:
+        return False
+    return e <= s
+
+
+def _next_date(iso_date: str) -> str:
+    """计算 ISO 日期的下一天。"""
+    try:
+        d = datetime.strptime(iso_date, "%Y-%m-%d")
+        return (d + timedelta(days=1)).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
 
 
 # ─────────────────────── 考勤明细 attendance_details ───────────────────────
@@ -22,6 +45,10 @@ def _normalize_employee_name(value: str) -> str:
 
 def _bi_day_to_iso(label, audit_month: str) -> str:
     text = str(label or "").strip()
+    # 支持完整 ISO 日期标签（如 "2026-09-01"），用于跨月合并
+    m_iso = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if m_iso:
+        return f"{int(m_iso.group(1)):04d}-{int(m_iso.group(2)):02d}-{int(m_iso.group(3)):02d}"
     digits = re.sub(r"\D", "", text)
     if not digits:
         return ""
@@ -87,6 +114,7 @@ def _build_attendance_details(
                             "shift_name": shift_name,
                             "shift_start_time": shift_start,
                             "shift_end_time": shift_end,
+                            "is_cross_midnight": _detect_cross_midnight(shift_start, shift_end),
                         }
 
     # 2) BI 打卡索引：(employee_name, date) -> [clocks]
@@ -151,7 +179,43 @@ def _build_attendance_details(
     all_keys = set(schedule_idx.keys()) | set(bi_idx.keys()) | set(exception_idx.keys())
     for (name, date_str) in sorted(all_keys, key=lambda x: (x[0], x[1])):
         sched = schedule_idx.get((name, date_str)) or {}
-        clocks = bi_idx.get((name, date_str)) or []
+        # 当日打卡（上班卡+中间卡） → 次日打卡（中间卡+下班卡）
+        # 当日不标日期，次日标日期前缀，各自按时间排序
+        raw_clocks = list(bi_idx.get((name, date_str)) or [])
+        raw_next_clocks: list[str] = []
+        next_dt = ""
+        if sched.get("is_cross_midnight"):
+            next_dt = _next_date(date_str)
+            if next_dt:
+                raw_next_clocks = list(bi_idx.get((name, next_dt)) or [])
+
+            # 跨天班次过滤：只保留属于当前班次的打卡
+            # 当日：>= 班次开始时间-2h缓冲（如 20:00-2h=18:00），排除前一个夜班的下班卡（07:xx、11:xx）
+            # 次日：<= 班次结束时间+2h缓冲（如 08:00+2h=10:00），排除下一个班次的上班卡（19:xx）
+            def _to_min_val(t):
+                m = re.match(r"(\d{1,2}):(\d{2})", str(t).strip())
+                return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+            _s_min = _to_min_val(sched.get("shift_start_time", ""))
+            _e_min = _to_min_val(sched.get("shift_end_time", ""))
+            if _s_min is not None:
+                _s_buf = max(0, _s_min - 120)
+                raw_clocks = [t for t in raw_clocks
+                              if (_to_min_val(t) or -1) >= _s_buf]
+            if _e_min is not None:
+                _e_buf = _e_min + 120
+                raw_next_clocks = [t for t in raw_next_clocks
+                                   if (_to_min_val(t) or 9999) <= _e_buf]
+
+        def _sort_key(t: str) -> int:
+            m = re.search(r"(\d{1,2}):(\d{2})", str(t))
+            return int(m.group(1)) * 60 + int(m.group(2)) if m else 0
+
+        clocks: list[str] = []
+        if raw_clocks:
+            clocks.extend(sorted(raw_clocks, key=_sort_key))
+        if raw_next_clocks:
+            clocks.extend([f"{next_dt} {t}" for t in sorted(raw_next_clocks, key=_sort_key)])
         exceptions = exception_idx.get((name, date_str)) or []
         exc_types = [e["type"] for e in exceptions]
         exc_reasons = [e["reason"] for e in exceptions]

@@ -13,7 +13,7 @@ from app.api.v2.service.audit_attendance_service import (
     extract_s04_rules,
     get_absence_coefficient,
 )
-from app.api.v2.utils.audit_common import normalize_employee_name
+from app.api.v2.utils.audit_common import normalize_employee_name, parse_shift_by_weekday, get_shift_for_date, parse_time_value, time_to_minutes
 
 
 def _load_active_s04_rules(project_name: str, business_type: str):
@@ -29,15 +29,18 @@ def _load_active_s04_rules(project_name: str, business_type: str):
 
 
 def _next_month(audit_month: str) -> str:
-    """计算下个月，支持 'YYYYMM' 和 'YYYY-MM' 格式。"""
+    """计算下个月，保持输入格式（'YYYYMM' → 'YYYYMM'，'YYYY-MM' → 'YYYY-MM'）。"""
     s = str(audit_month or "").strip()
     m = re.match(r"(\d{4})[-年.]?(\d{1,2})", s)
     if not m:
         return ""
     year, month = int(m.group(1)), int(m.group(2))
+    has_sep = bool(re.match(r"\d{4}[-年.]", s))
     if month == 12:
-        return f"{year + 1:04d}-01"
-    return f"{year:04d}-{month + 1:02d}"
+        nm = f"{year + 1:04d}-01" if has_sep else f"{year + 1:04d}01"
+    else:
+        nm = f"{year:04d}-{month + 1:02d}" if has_sep else f"{year:04d}{month + 1:02d}"
+    return nm
 
 
 def _find_cross_night_employees_on_last_day(
@@ -50,19 +53,27 @@ def _find_cross_night_employees_on_last_day(
         return set()
     year, month_num = int(m.group(1)), int(m.group(2))
     _, last_day = monthrange(year, month_num)
-    last_day_date = f"{audit_month}-{last_day:02d}"
+    # 标准化为 ISO 格式（如 "2026-08-31"），与排班表中的日期格式一致
+    month_iso = f"{year:04d}-{month_num:02d}"
+    last_day_date = f"{month_iso}-{last_day:02d}"
 
     employees: set[str] = set()
     for pi in position_infos:
         for p in pi.positions:
-            if p.is_cross_midnight:
-                for slot in p.slots:
-                    if last_day_date in slot.daily:
-                        for cells in slot.daily[last_day_date]:
-                            for name in cells.get("names", []):
-                                nn = normalize_employee_name(name)
-                                if nn:
-                                    employees.add(nn)
+            shifts = parse_shift_by_weekday(p.shift_time)
+            for slot in p.slots:
+                if last_day_date in slot.daily:
+                    start, end = get_shift_for_date(shifts, last_day_date)
+                    _s = time_to_minutes(parse_time_value(start))
+                    _e = time_to_minutes(parse_time_value(end))
+                    auto_cross = bool(_s is not None and _e is not None and _e <= _s)
+                    if not auto_cross:
+                        continue
+                    for cells in slot.daily[last_day_date]:
+                        for name in cells.get("names", []):
+                            nn = normalize_employee_name(name)
+                            if nn:
+                                employees.add(nn)
     return employees
 
 
@@ -72,22 +83,24 @@ def _merge_next_month_bi(
     audit_month: str,
     cross_night_employees: set[str],
 ) -> list[dict]:
-    """将下个月1号的 BI 打卡数据合并到当月最后一天的记录中。
+    """将下个月1号的 BI 打卡数据以独立 ISO 日期标签合并到当月记录中。
 
     仅对 cross_night_employees 中的员工执行合并，避免影响正常白班员工。
-    跨夜班次（如 22:00-06:00）在月底最后一天上班时，下班卡打在下月1号。
-    将下月1号的打卡合并到当月最后一天的标签下（如7月用 '31日'），
-    使 _bi_day_to_iso('31日', '2026-07') → '2026-07-31'，审核时能看到跨夜下班卡。
+    跨夜班次（如 20:00-08:00）在月底最后一天上班时，下班卡打在下月1号。
+    将下月1号的打卡存储为独立标签（如 '2026-09-01'），
+    使 _bi_day_to_iso('2026-09-01', '2026-08') → '2026-09-01'，
+    审核时 bi_index 能按 (name, '2026-09-01') 检索到跨夜下班卡。
     """
     if not next_records or not cross_night_employees:
         return current_records
 
-    m = re.match(r"(\d{4})[-年.]?(\d{1,2})", str(audit_month or "").strip())
-    if not m:
+    next_month = _next_month(audit_month)
+    if not next_month:
         return current_records
-    year, month_num = int(m.group(1)), int(m.group(2))
-    _, last_day = monthrange(year, month_num)
-    last_day_label = f"{last_day}日"
+    # 标准化为 YYYY-MM-DD 格式，使 _bi_day_to_iso 能正确识别
+    m_nm = re.match(r"(\d{4})[-年.]?(\d{1,2})", next_month)
+    next_month_norm = f"{int(m_nm.group(1)):04d}-{int(m_nm.group(2)):02d}" if m_nm else next_month
+    next_day1_label = f"{next_month_norm}-01"
 
     next_day1_map: dict[str, list[str]] = {}
     for rec in next_records:
@@ -116,10 +129,7 @@ def _merge_next_month_bi(
         name = normalize_employee_name(rec.get("employee_name", ""))
         att = dict(rec.get("attendance", {}) or {})
         if name in next_day1_map:
-            existing = att.get(last_day_label) or []
-            if not isinstance(existing, list):
-                existing = [str(existing)]
-            att[last_day_label] = list(existing) + next_day1_map[name]
+            att[next_day1_label] = next_day1_map[name]
         merged.append({**rec, "attendance": att})
         merged_names.add(name)
 
@@ -129,7 +139,7 @@ def _merge_next_month_bi(
             if template:
                 merged.append({
                     **template,
-                    "attendance": {last_day_label: clocks},
+                    "attendance": {next_day1_label: clocks},
                 })
 
     return merged

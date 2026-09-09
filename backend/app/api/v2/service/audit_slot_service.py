@@ -55,6 +55,10 @@ def _norm_month(audit_month: str) -> str:
 def _bi_day_to_iso(label: Any, audit_month: str) -> str:
     """把 BI 的 '1日' / '1' / '2026-07-01' 转成 ISO 日期。"""
     text = str(label or "").strip()
+    # 支持完整 ISO 日期标签（如 "2026-09-01"），用于跨月合并
+    m_iso = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if m_iso:
+        return f"{int(m_iso.group(1)):04d}-{int(m_iso.group(2)):02d}-{int(m_iso.group(3)):02d}"
     digits = re.sub(r"\D", "", text)
     if not digits:
         return ""

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.api.v2.models.position_models import PositionInfo
@@ -51,12 +52,25 @@ def _norm_month(audit_month: str) -> str:
 
 def _bi_day_to_iso(label: Any, audit_month: str) -> str:
     text = str(label or "").strip()
+    # 支持完整 ISO 日期标签（如 "2026-09-01"），用于跨月合并
+    m_iso = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if m_iso:
+        return f"{int(m_iso.group(1)):04d}-{int(m_iso.group(2)):02d}-{int(m_iso.group(3)):02d}"
     digits = re.sub(r"\D", "", text)
     if not digits:
         return ""
     day = int(digits[-2:]) if len(digits) >= 2 else int(digits)
     try:
         return f"{audit_month}-{day:02d}"
+    except Exception:
+        return ""
+
+
+def _next_date(iso_date: str) -> str:
+    """计算 ISO 日期的下一天。"""
+    try:
+        d = datetime.strptime(iso_date, "%Y-%m-%d")
+        return (d + timedelta(days=1)).strftime("%Y-%m-%d")
     except Exception:
         return ""
 
@@ -122,6 +136,10 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
             for slot in p.slots:
                 for work_date, cells in slot.daily.items():
                     start, end = get_shift_for_date(shifts, work_date)
+                    # 自动检测跨天：结束时间 <= 开始时间 → 跨天（夜班）
+                    _s = time_to_minutes(parse_time_value(start))
+                    _e = time_to_minutes(parse_time_value(end))
+                    auto_cross = bool(_s is not None and _e is not None and _e <= _s)
                     for cell in cells:
                         status = cell.get("status", "")
                         if status == "缺岗":
@@ -133,7 +151,7 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                                     "position": p.position_name,
                                     "hourly_rate": p.hourly_rate,
                                     "daily_hours": p.daily_hours,
-                                    "is_cross_midnight": p.is_cross_midnight,
+                                    "is_cross_midnight": auto_cross,
                                     "mid_clock_windows": mid_clock_windows,
                                 }
                             continue
@@ -146,7 +164,7 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                                     "position": p.position_name,
                                     "hourly_rate": p.hourly_rate,
                                     "daily_hours": p.daily_hours,
-                                    "is_cross_midnight": p.is_cross_midnight,
+                                    "is_cross_midnight": auto_cross,
                                     "mid_clock_windows": mid_clock_windows,
                                 }
     return index, vacancies
@@ -350,7 +368,46 @@ def run_attendance_s04_audit(
     employee_data: dict[str, dict] = {}
 
     for (name, work_date), sched in schedule_index.items():
-        clocks = bi_index.get((name, work_date), [])
+        clocks = list(bi_index.get((name, work_date), []))
+        is_cross = sched.get("is_cross_midnight", False)
+
+        # 跨天班次：合并次日的打卡数据（夜班 20:00-08:00 跨两天）
+        next_dt = ""
+        next_clocks: list[str] = []
+        if is_cross:
+            next_dt = _next_date(work_date)
+            if next_dt:
+                next_clocks = list(bi_index.get((name, next_dt), []))
+
+            # 跨天班次过滤：只保留属于当前班次的打卡
+            # 当日：>= 班次开始时间-2h缓冲（如 20:00-2h=18:00），排除前一个夜班的下班卡（07:xx、11:xx）
+            # 次日：<= 班次结束时间+2h缓冲（如 08:00+2h=10:00），排除下一个班次的上班卡（19:xx）
+            _s_min = time_to_minutes(parse_time_value(sched["shift_start"]))
+            _e_min = time_to_minutes(parse_time_value(sched["shift_end"]))
+            if _s_min is not None:
+                _s_buf = max(0, _s_min - 120)
+                clocks = [t for t in clocks
+                          if (time_to_minutes(parse_time_value(t)) or -1) >= _s_buf]
+            if _e_min is not None:
+                _e_buf = _e_min + 120
+                next_clocks = [t for t in next_clocks
+                               if (time_to_minutes(parse_time_value(t)) or 9999) <= _e_buf]
+
+        # 构建显示用打卡列表：
+        # 当日打卡（上班卡+中间卡） → 次日打卡（中间卡+下班卡）
+        # 当日不标日期，次日标日期前缀，各自按时间排序
+        def _sort_key(t: str) -> int:
+            v = parse_time_value(t)
+            m = time_to_minutes(v) if v else 0
+            return m if m is not None else 0
+
+        clock_display: list[str] = []
+        if clocks:
+            clock_display.extend(sorted(clocks, key=_sort_key))
+        if next_clocks:
+            clock_display.extend([f"{next_dt} {t}" for t in sorted(next_clocks, key=_sort_key)])
+
+        all_clocks = clocks + next_clocks
         mid_clock_windows = sched.get("mid_clock_windows", [])
         entry = employee_data.setdefault(name, {
             "employee_name": name,
@@ -365,13 +422,13 @@ def run_attendance_s04_audit(
             "mid_clock_issues": [],
             "daily_rate": round(sched["hourly_rate"] * sched["daily_hours"], 2),
         })
-        entry["position"] = sched["position"]
 
-        if not clocks:
+        if not all_clocks:
             # 签到表写了人名 = 人来了，但没有打卡记录 → 漏打卡
             entry["missing_clock_dates"].add(work_date)
             entry["missing_clock_records"].append({
                 "date": work_date,
+                "position": sched["position"],
                 "shift_start": sched["shift_start"],
                 "shift_end": sched["shift_end"],
                 "clock_times": [],
@@ -380,15 +437,15 @@ def run_attendance_s04_audit(
 
         if mid_clock_windows:
             mid_compliance = _check_mid_clock_compliance(
-                clocks, mid_clock_windows, sched["shift_start"], sched["shift_end"], sched["is_cross_midnight"]
+                all_clocks, mid_clock_windows, sched["shift_start"], sched["shift_end"], is_cross
             )
             if mid_compliance["mid_clock_issues"]:
                 for issue in mid_compliance["mid_clock_issues"]:
-                    entry["mid_clock_issues"].append({**issue, "date": work_date, "shift_start": sched["shift_start"], "shift_end": sched["shift_end"], "clock_times": list(clocks)})
+                    entry["mid_clock_issues"].append({**issue, "date": work_date, "position": sched["position"], "shift_start": sched["shift_start"], "shift_end": sched["shift_end"], "clock_times": list(clock_display)})
                 entry["missing_clock_count_extra"] += mid_compliance["total_missing_mid_clocks"]
 
         late, early = _calc_late_early_minutes(
-            clocks, sched["shift_start"], sched["shift_end"], sched["is_cross_midnight"]
+            all_clocks, sched["shift_start"], sched["shift_end"], is_cross
         )
 
         if late > 0:
@@ -399,15 +456,19 @@ def run_attendance_s04_audit(
                 if not any(r["date"] == work_date for r in entry["missing_clock_records"]):
                     entry["missing_clock_records"].append({
                         "date": work_date,
+                        "position": sched["position"],
                         "shift_start": sched["shift_start"],
                         "shift_end": sched["shift_end"],
-                        "clock_times": list(clocks),
+                        "clock_times": list(clock_display),
                     })
             else:
                 entry["late_details"].append({
                     "date": work_date,
+                    "position": sched["position"],
                     "shift_start": sched["shift_start"],
-                    "clock_in": clocks[0] if clocks else "",
+                    "shift_end": sched["shift_end"],
+                    "clock_in": all_clocks[0] if all_clocks else "",
+                    "clock_times": list(clock_display),
                     "minutes": late,
                     "tier": tier,
                     "amount": amount,
@@ -420,18 +481,44 @@ def run_attendance_s04_audit(
                 if not any(r["date"] == work_date for r in entry["missing_clock_records"]):
                     entry["missing_clock_records"].append({
                         "date": work_date,
+                        "position": sched["position"],
                         "shift_start": sched["shift_start"],
                         "shift_end": sched["shift_end"],
-                        "clock_times": list(clocks),
+                        "clock_times": list(clock_display),
                     })
             else:
                 entry["early_leave_details"].append({
                     "date": work_date,
+                    "position": sched["position"],
+                    "shift_start": sched["shift_start"],
                     "shift_end": sched["shift_end"],
-                    "clock_out": clocks[-1] if clocks else "",
+                    "clock_out": all_clocks[-1] if all_clocks else "",
+                    "clock_times": list(clock_display),
                     "minutes": early,
                     "tier": tier,
                     "amount": amount,
+                })
+
+        # 检查漏下班卡：有上班卡但无下班卡
+        # 跨天班次：有当日打卡但无次日打卡 → 下班卡缺失
+        # 非跨天班次：只有一条打卡 → 下班卡或上班卡缺失
+        has_missing_clockout = False
+        if is_cross:
+            if clocks and not next_clocks:
+                has_missing_clockout = True
+        else:
+            if len(all_clocks) == 1:
+                has_missing_clockout = True
+
+        if has_missing_clockout:
+            entry["missing_clock_dates"].add(work_date)
+            if not any(r["date"] == work_date for r in entry["missing_clock_records"]):
+                entry["missing_clock_records"].append({
+                    "date": work_date,
+                    "position": sched["position"],
+                    "shift_start": sched["shift_start"],
+                    "shift_end": sched["shift_end"],
+                    "clock_times": list(clock_display),
                 })
 
     # 处理缺岗：签到表标记"缺岗" = 确定缺勤，不比对考勤
@@ -455,6 +542,7 @@ def run_attendance_s04_audit(
         entry["absence_dates"].add(work_date)
         entry["absence_records"].append({
             "date": work_date,
+            "position": pos,
             "shift_start": vac["shift_start"],
             "shift_end": vac["shift_end"],
             "clock_times": [],
