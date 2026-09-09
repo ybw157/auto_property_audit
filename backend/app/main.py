@@ -89,6 +89,11 @@ Path(settings.bi_dir).mkdir(parents=True, exist_ok=True)
 
 init_db()
 
+# 启动即清理超过保留期（21 天）的过期报告，避免磁盘缓存无限堆积
+from app.api.v2.dao import report_dao
+
+report_dao.cleanup_expired_reports()
+
 
 app.mount("/files", StaticFiles(directory=settings.storage_dir), name="files")
 

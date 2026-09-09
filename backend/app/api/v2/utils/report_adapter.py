@@ -1,6 +1,6 @@
 """新流水线数据 → 旧版报告生成器所需的 results dict 适配层。
 
-旧版 pdf_report_old.py（build_attendance_base_pdf / build_deduction_pdf /
+旧版 pdf_report_old.py（build_attendance_base_pdf /
 build_combined_report_pdf）使用一套固定的 results 字段约定（见各函数体内的
 results.get(...) 调用）。新流水线产出的 audit_results 数据结构不同，
 本模块负责把新数据展平成旧字段，**只产出旧报告函数实际读取的字段**，
@@ -441,8 +441,6 @@ def adapt_to_old_results(
     不增不减，确保报告样式和逻辑与旧版完全一致。
 
     kind 决定扣款汇总两块数据的形态：
-      - "deduction"（扣款金额报告 build_deduction_pdf）：deduction_summary 必须是
-        按员工汇总的列表（对应『五、人员扣款汇总』表格列）。
       - "combined"（审核汇总 build_combined_report_pdf）：deduction_summary 必须是
         单条总额 dict（build_management_suggestions 读 total_deduction_amount），
         而 per-employee 列表放到 employee_deduction_summary 里，避免重复渲染。
