@@ -3,11 +3,17 @@ from pathlib import Path
 from pydantic import BaseModel
 
 
+def _resolve_storage_dir() -> Path:
+    base_dir = Path(__file__).resolve().parents[4]
+    raw = Path(os.getenv("STORAGE_DIR", str(base_dir / "storage")))
+    return raw if raw.is_absolute() else (base_dir / raw).resolve()
+
+
 class Settings(BaseModel):
     app_name: str = "物业集团保安保洁智能审核平台"
 
     base_dir: Path = Path(__file__).resolve().parents[4]
-    storage_dir: Path = Path(os.getenv("STORAGE_DIR", str(base_dir / "storage")))
+    storage_dir: Path = _resolve_storage_dir()
     upload_dir: Path = storage_dir / "uploads"
     report_dir: Path = storage_dir / "reports"
     template_dir: Path = storage_dir / "templates"

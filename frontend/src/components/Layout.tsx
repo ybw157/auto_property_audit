@@ -29,7 +29,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen">
-      <aside className="w-72 border-r border-slate-200 bg-slate-950 text-white">
+      <aside className="w-56 border-r border-slate-200 bg-slate-950 text-white">
         <div className="flex items-center gap-3 border-b border-white/10 px-6 py-6">
           <div className="rounded-2xl bg-brand-600 p-3"><ShieldCheck size={24} /></div>
           <div>

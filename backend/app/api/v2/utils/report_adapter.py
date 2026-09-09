@@ -370,9 +370,10 @@ def _build_summary_dict(audit_results: dict, audit_month: str, attendance_deduct
     s04_sum = s04.get("summary", {}) or {}
     final_sum = audit_results.get("final_summary", {}) or {}
     slot_summary = audit_results.get("summary", []) or []
-    schedule_task_count = sum(int(s.get("required_days", 0) or 0) for s in slot_summary)
+    slot_details_raw = audit_results.get("slot_details", []) or []
+    schedule_task_count = sum(1 for d in slot_details_raw if d.get("status") not in ("休息", "请假"))
     audited_days = _month_days_from_str(audit_month)
-    # 异常条数 = 非"岗位缺编"的扣款明细行数（漏打卡/迟到/早退/脱岗/中间卡）
+    # 异常记录数 = 个人考勤异常总条数（非岗位缺编的扣款明细行数）
     exception_count = sum(1 for d in (attendance_deductions or []) if d.get("exception_type") != "岗位缺编")
     # 考勤扣款 = 扣款明细中个人考勤部分（迟到/早退/漏打卡/缺勤/中间卡）之和，
     # 与『扣款明细』表中实际展示的个人考勤行口径一致。
