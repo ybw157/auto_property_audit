@@ -70,7 +70,7 @@ def user_from_token(request: Request) -> dict | None:
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
     # 非业务接口、静态文件、健康检查、登录接口直接放行
-    if not path.startswith("/api/v2") or path == "/api/v2/user/login":
+    if not path.startswith("/api/v2") or path == "/api/v2/user/login" or path.startswith("/api/v2/templates/"):
         return await call_next(request)
     user = user_from_token(request)
     if not user:

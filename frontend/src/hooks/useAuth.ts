@@ -1,5 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
-import { request, getToken, setToken, clearToken } from '../services/api'
+import { getToken, setToken, clearToken } from '../services/api'
+import {
+  fetchUserMe,
+  clearConfigCache,
+  invalidateConfig,
+  subscribeConfig,
+  CONFIG_KEYS,
+} from '../services/configCache'
 import type { LoginUser } from '../types'
 
 export function useAuth() {
@@ -14,10 +21,21 @@ export function useAuth() {
       setLoading(false)
       return
     }
-    request<LoginUser>('/api/v2/user/me')
+    // 走 sessionStorage 缓存：同一标签页内多个组件共用一份，不会每个组件都打接口
+    fetchUserMe()
       .then((u) => setUser(u))
       .catch(() => setUser(null))
       .finally(() => setLoading(false))
+  }, [])
+
+  // 用户信息变更时同步（同页面写入 / 其他标签页更新），保持所有 useAuth 实例一致
+  useEffect(() => {
+    return subscribeConfig(CONFIG_KEYS.USER_ME, () => {
+      if (!getToken()) return
+      fetchUserMe()
+        .then((u) => setUser(u))
+        .catch(() => setUser(null))
+    })
   }, [])
 
   useEffect(() => {
@@ -32,12 +50,15 @@ export function useAuth() {
   }, [role, projectName])
 
   const login = useCallback((token: string, u: LoginUser) => {
+    clearConfigCache() // 换账号，清掉上个用户的缓存
     setToken(token)
     setUser(u)
+    invalidateConfig(CONFIG_KEYS.USER_ME, 'session')
   }, [])
 
   const logout = useCallback(() => {
     clearToken()
+    clearConfigCache() // 登出清空全部配置缓存，避免串号
     localStorage.removeItem('appRole')
     localStorage.removeItem('appProjectName')
     localStorage.removeItem('auditContext')

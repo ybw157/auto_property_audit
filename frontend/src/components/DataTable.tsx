@@ -1,12 +1,15 @@
+import type { ReactNode } from 'react'
+
 type Props = {
   rows: Record<string, unknown>[]
   emptyText?: string
   columns?: string[]
   labels?: Record<string, string>
   getRowClassName?: (row: Record<string, unknown>) => string
+  renderCell?: (row: Record<string, unknown>, key: string) => ReactNode
 }
 
-export function DataTable({ rows, emptyText = '暂无数据', columns, labels = {}, getRowClassName }: Props) {
+export function DataTable({ rows, emptyText = '暂无数据', columns, labels = {}, getRowClassName, renderCell }: Props) {
   if (!rows.length) return <div className="card p-8 text-center text-sm text-slate-500">{emptyText}</div>
   const headers = (columns?.length ? columns : Object.keys(rows[0])).filter((key) => key in rows[0]).slice(0, 12)
   return (
@@ -21,7 +24,7 @@ export function DataTable({ rows, emptyText = '暂无数据', columns, labels = 
           <tbody className="divide-y divide-slate-100 bg-white">
             {rows.map((row, idx) => (
               <tr key={idx} className={`${getRowClassName?.(row) ?? 'hover:bg-slate-50'}`}>
-                {headers.map((header) => <td key={header} className="px-4 py-3 align-top text-slate-700 break-words">{String(row[header] ?? '')}</td>)}
+                {headers.map((header) => <td key={header} className="px-4 py-3 align-top text-slate-700 break-words">{renderCell ? renderCell(row, header) : String(row[header] ?? '')}</td>)}
               </tr>
             ))}
           </tbody>

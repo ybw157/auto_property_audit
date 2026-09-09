@@ -211,12 +211,8 @@ def _parse_metadata(text: str, original_name: str) -> dict:
     elif "保安" in text_oneline[:200]:
         service_type = "保安"
 
+    # 不再从合同文本中解析业态，改为用户手动从项目-业态映射中选择
     business_type = ""
-    business_keywords = ["住宅", "商业", "物业", "酒店", "街区", "写字楼", "保洁", "保安"]
-    for kw in business_keywords:
-        if kw in text_oneline[:500]:
-            business_type = kw
-            break
 
     start_date, end_date = _extract_contract_period(text)
 

@@ -1,14 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import { DataTable } from '../components/DataTable'
-import { ReportDownloads } from '../components/ReportDownloads'
 import { request } from '../services/api'
 import type { AuditContext } from '../types'
 import { useAuditContext } from '../hooks/useAuditContext'
 import { useAuth } from '../hooks/useAuth'
 
 const tabs = [
-  ['attendance-details', '保洁考勤明细'],
-  ['position-fulfillment', '排班审核汇总'],
   ['exceptions', '人员异常统计'],
   ['attendance-deductions', '人员考勤扣款'],
   ['deductions', '扣款汇总'],
@@ -37,8 +35,6 @@ const columnLabels: Record<string, string> = {
 }
 
 const tabColumns: Record<string, string[]> = {
-  'attendance-details': ['employee_name', 'position', 'work_date', 'exception_type', 'deduction_amount', 'detail'],
-  'position-fulfillment': ['work_date', 'position', 'area', 'scheduled', 'actual_present', 'status', 'note'],
   exceptions: ['employee_name', 'position', 'missing_clock_count', 'late_count', 'early_leave_count', 'absence_count', 'absence_daily_rate', 'total_deduction'],
   'attendance-deductions': ['employee_name', 'position', 'exception_type', 'deduction_amount'],
   deductions: ['summary_item', 'deduction_amount'],
@@ -58,6 +54,7 @@ export function AuditResults() {
     attendanceDeductions: [] as Record<string, unknown>[],
     deductions: [] as Record<string, unknown>[],
     s04Summary: {} as Record<string, unknown>,
+    deductionDetails: [] as Record<string, unknown>[],
   })
   const [proofUpdating, setProofUpdating] = useState<string>('')
   const [detailData, setDetailData] = useState<Record<string, unknown> | null>(null)
@@ -173,6 +170,8 @@ export function AuditResults() {
         absence_count: d.absence_count ?? (Array.isArray(d.absence_dates) ? (d.absence_dates as unknown[]).length : 0),
         absence_daily_rate: Number(d.absence_daily_rate || 0),
         total_deduction: Number(d.total_deduction || 0),
+        // 扣款合计的计算公式（仅用于展示，不在 columns 里），如：缺勤1次×日服务费190.68元×1.2
+        deduction_formula: buildDeductionFormula(d),
       }))
     }
     if (tabKey === 'attendance-deductions') {
@@ -224,13 +223,14 @@ export function AuditResults() {
           attendanceDeductions: buildTabRows('attendance-deductions', parsed),
           deductions: buildTabRows('deductions', parsed),
           s04Summary: parsed.s04.summary as Record<string, unknown> || {},
+          deductionDetails: parsed.deductionDetails,
         })
         setRows(buildTabRows(tab, parsed))
       })
       .catch(() => {
         setDetailData(null)
         setRows([])
-        setDashboard({ attendanceDetails: [], positionFulfillment: [], exceptions: [], attendanceDeductions: [], deductions: [], s04Summary: {} })
+        setDashboard({ attendanceDetails: [], positionFulfillment: [], exceptions: [], attendanceDeductions: [], deductions: [], s04Summary: {}, deductionDetails: [] })
       })
   }, [auditContext])
 
@@ -285,11 +285,16 @@ export function AuditResults() {
         {message && <div className="mt-3 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">{message}</div>}
       </div>
       <AuditDashboard data={dashboard} />
-      <ReportDownloads auditContext={auditContext} />
       <div className="flex gap-2">
         {tabs.map(([key, label]) => <button key={key} className={key === tab ? 'btn-primary' : 'btn-secondary'} onClick={() => setTab(key)}>{label}</button>)}
       </div>
-      <DataTable rows={rows} columns={tabColumns[tab]} labels={columnLabels} getRowClassName={getResultRowClassName} />
+      <DataTable
+        rows={rows}
+        columns={tabColumns[tab]}
+        labels={columnLabels}
+        getRowClassName={getResultRowClassName}
+        renderCell={tab === 'exceptions' ? renderExceptionCell : undefined}
+      />
 
       {tab === 'attendance-deductions' && dashboard.attendanceDeductions.some((d) => String(d.exception_type || '') === '漏打卡') && (
         <div className="card p-5">
@@ -347,6 +352,50 @@ function getResultRowClassName(row: Record<string, unknown>) {
   return 'hover:bg-slate-50'
 }
 
+/**
+ * 扣款合计的计算公式，与「保洁考勤明细」详情列同口径：
+ *   漏打卡扣款 = 漏打卡次数 × 每次扣款单价（合同 missing_clock_deduction）
+ *   缺勤扣款   = 缺勤次数 × 日服务费 × 缺勤系数（合同缺编系数）
+ *   迟到/早退  = 各次扣款金额合计
+ */
+function buildDeductionFormula(d: Record<string, unknown>): string {
+  const parts: string[] = []
+  const missingCount = toNumber(d.missing_clock_count)
+  const missingAmount = toNumber(d.missing_clock_amount)
+  if (missingCount > 0) {
+    const unitPrice = missingAmount / missingCount
+    parts.push(`漏打卡${missingCount}次×${trimNum(unitPrice)}元/次`)
+  }
+  const absenceCount = toNumber(d.absence_count)
+  const dailyRate = toNumber(d.absence_daily_rate)
+  const multiplier = toNumber(d.absence_multiplier)
+  if (absenceCount > 0) {
+    parts.push(`缺勤${absenceCount}次×日服务费${trimNum(dailyRate)}元×${trimNum(multiplier)}`)
+  }
+  const lateTotal = toNumber(d.late_total)
+  if (lateTotal > 0) parts.push(`迟到扣${trimNum(lateTotal)}元`)
+  const earlyTotal = toNumber(d.early_leave_total)
+  if (earlyTotal > 0) parts.push(`早退扣${trimNum(earlyTotal)}元`)
+  return parts.join(' + ')
+}
+
+function trimNum(value: number): string {
+  return String(Math.round(value * 100) / 100)
+}
+
+/** 人员异常统计表的单元格渲染：扣款合计列在金额下方展示计算公式 */
+function renderExceptionCell(row: Record<string, unknown>, key: string): ReactNode {
+  if (key !== 'total_deduction') return String(row[key] ?? '')
+  const amount = toNumber(row.total_deduction)
+  const formula = String(row.deduction_formula || '')
+  return (
+    <div>
+      <div className="font-medium">{amount ? amount.toFixed(2) : '0'}</div>
+      {formula && <div className="mt-1 text-xs leading-5 text-slate-500 break-words">{formula}</div>}
+    </div>
+  )
+}
+
 function isAbnormalRow(row: Record<string, unknown>) {
   const exception = String(row.exception_type || '')
   const status = String(row.result_status || row.status || '')
@@ -360,6 +409,7 @@ type DashboardData = {
   attendanceDeductions: Record<string, unknown>[]
   deductions: Record<string, unknown>[]
   s04Summary: Record<string, unknown>
+  deductionDetails: Record<string, unknown>[]
 }
 
 function AuditDashboard({ data }: { data: DashboardData }) {
@@ -506,13 +556,21 @@ function buildDashboardView(data: DashboardData) {
   const exceptionPeople = new Set(exceptionRows.map((item) => String(item.employee_name || '')).filter(Boolean))
   const allAuditedPeople = new Set(data.exceptions.map((item) => String(item.employee_name || '')).filter(Boolean))
   const auditedDays = new Set(data.positionFulfillment.map((item) => String(item.work_date || '')).filter(Boolean)).size
-  // 异常记录数 = 个人考勤异常总条数（漏打卡+中间卡+迟到+早退+缺勤）
-  const exceptionCount = data.attendanceDetails.length
   // 排班任务数 = 排除休息/请假后的排班条数（即实际需审核的排班数）
   const scheduleTaskCount = data.positionFulfillment.filter((it) => {
     const s = String(it.status || '')
     return s !== '休息' && s !== '请假'
   }).length
+  // 异常记录数 = 从 deduction_details 逐项累加（漏打卡+中间卡+迟到+早退+缺勤）
+  // 与 GitHub 版本和后端 finalize 同口径
+  const exceptionCount = data.deductionDetails.reduce((sum, d) => {
+    const missingClockDates = Array.isArray(d.missing_clock_dates) ? d.missing_clock_dates.length : 0
+    const midClockIssues = Array.isArray(d.mid_clock_issues) ? d.mid_clock_issues.length : 0
+    const lateDetails = Array.isArray(d.late_details) ? d.late_details.length : 0
+    const earlyLeaveDetails = Array.isArray(d.early_leave_details) ? d.early_leave_details.length : 0
+    const absenceDates = Array.isArray(d.absence_dates) ? d.absence_dates.length : 0
+    return sum + missingClockDates + midClockIssues + lateDetails + earlyLeaveDetails + absenceDates
+  }, 0)
   // 异常率 = 异常记录数 / 排班任务数（与 AiAudit 进度条 / 后端 finalize 同口径）
   const firstExceptionRate = scheduleTaskCount > 0
     ? Number(((exceptionCount / scheduleTaskCount) * 100).toFixed(1))
@@ -564,7 +622,7 @@ function buildDashboardView(data: DashboardData) {
     attendanceDeduction,
     totalDeduction,
     scheduleTaskCount,
-    exceptionCount: exceptionRows.length,
+    exceptionCount,
     firstExceptionRate,
     exceptionPeopleCount: exceptionPeople.size,
     auditedPeopleCount: allAuditedPeople.size,

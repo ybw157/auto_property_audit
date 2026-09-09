@@ -15,22 +15,26 @@ router = APIRouter()
 
 @router.post("/positions/upload")
 async def upload_position_excel(
+    request: Request,
     file: UploadFile = File(...),
 
 ):
     """
     上传并解析项目岗位 Excel 表格。
 
+    :param request: 请求对象（用于获取当前登录用户信息）
     :param file: Excel 文件（.xlsx）
     :return: 解析后的岗位信息列表
     """
     if not file.filename or not file.filename.endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="仅支持 .xlsx 文件")
-    data = upload_and_parse_excel(file)
+    # 获取登录用户的项目名，强制覆盖 Excel 中解析出的项目名
+    user_project_name = resolve_project_name(request, "")
+    data = upload_and_parse_excel(file, force_project_name=user_project_name)
 
     return Result.ok(
         data={
-            "project_name": data["positions"][0]["project_name"],
+            "project_name": data["positions"][0]["project_name"] if data["positions"] else user_project_name,
             "audit_month": data["audit_month"],
             "bi_month": data["bi_month"],
             "data":data

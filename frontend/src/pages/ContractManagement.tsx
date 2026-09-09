@@ -1,5 +1,13 @@
 import { DragEvent, useEffect, useSyncExternalStore, useState } from 'react'
 import { request } from '../services/api'
+import {
+  fetchBusinessTypes,
+  fetchContracts,
+  invalidateConfig,
+  subscribeConfig,
+  CONFIG_KEYS,
+  type BusinessTypeConfig,
+} from '../services/configCache'
 import { useAuth } from '../hooks/useAuth'
 
 type ProjectContract = {
@@ -88,21 +96,28 @@ export function ContractManagement() {
 
   useEffect(() => {
     loadContracts()
+    // 订阅合同变更：本页写操作或其他标签页改动后，自动同步刷新列表
+    return subscribeConfig(CONFIG_KEYS.CONTRACTS, () => loadContracts())
   }, [currentRole, currentProjectName])
 
   useEffect(() => {
-    request<{ projects: string[]; mapping: Record<string, string[]> }>('/api/v2/business-types')
-      .then((data) => {
-        setBusinessTypeMapping(data.mapping)
-        setAllProjects(data.projects)
-      })
-      .catch(() => {})
+    const loadBusinessTypes = () => {
+      fetchBusinessTypes()
+        .then((data: BusinessTypeConfig) => {
+          setBusinessTypeMapping(data.mapping || {})
+          setAllProjects(data.projects || [])
+        })
+        .catch(() => {})
+    }
+    loadBusinessTypes()
+    return subscribeConfig(CONFIG_KEYS.BUSINESS_TYPES, loadBusinessTypes)
   }, [])
 
-  async function loadContracts() {
+  // force=true 表示刚做过写操作，跳过缓存强制拉最新
+  async function loadContracts(force = false) {
     try {
       // 后端根据用户角色自动筛选项目，前端无需传递 project_name
-      const rows = await request<ProjectContract[]>('/api/v2/contracts')
+      const rows = await fetchContracts<ProjectContract[]>(force)
       setContracts(rows)
     } catch {
       // 保留已有列表，不清空，避免停用/启用后记录"消失"
@@ -212,7 +227,9 @@ export function ContractManagement() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '合同状态更新失败')
     } finally {
-      loadContracts()
+      // 写操作后先让缓存失效，再强制拉最新，避免读到旧列表
+      invalidateConfig(CONFIG_KEYS.CONTRACTS)
+      loadContracts(true)
     }
   }
 
@@ -228,10 +245,12 @@ export function ContractManagement() {
       }
       await request(`/api/v2/contracts/${item.id}`, { method: 'DELETE' })
       setMessage('合同已删除')
-      loadContracts()
+      invalidateConfig(CONFIG_KEYS.CONTRACTS)
+      loadContracts(true)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '删除失败')
-      loadContracts()
+      invalidateConfig(CONFIG_KEYS.CONTRACTS)
+      loadContracts(true)
     }
   }
 
@@ -322,7 +341,7 @@ export function ContractManagement() {
   async function saveManualRules() {
     if (!editingContract) return
     if (!validateRequiredFields()) {
-      setMessage('请填写所有必填项（单人单日扣款上限为选填）')
+      setMessage('请填写所有必填项')
       return
     }
     setSavingRules(true)
@@ -359,7 +378,8 @@ export function ContractManagement() {
       })
       setMessage('合同信息已保存')
       setEditingContract(null)
-      await loadContracts()
+      invalidateConfig(CONFIG_KEYS.CONTRACTS)
+      await loadContracts(true)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '保存失败')
     }
@@ -372,7 +392,8 @@ export function ContractManagement() {
       const msg = uploadState.message
       _setContractUpload({ result: null, message: '', error: null })
       setMessage(msg)
-      loadContracts()
+      invalidateConfig(CONFIG_KEYS.CONTRACTS)
+      loadContracts(true)
       openManualEditor(result)
     } else if (uploadState.error) {
       const errMsg = uploadState.error
@@ -418,7 +439,7 @@ export function ContractManagement() {
           </div>
         )}
         <div className="mt-5 overflow-x-auto rounded-2xl border border-slate-200">
-          <table className="min-w-[980px] table-fixed text-sm">
+          <table className="w-full min-w-[980px] table-fixed text-sm">
             <thead className="bg-slate-50 text-slate-600">
               <tr>
                 <th className="w-40 px-4 py-3 text-left">项目</th>
@@ -460,8 +481,10 @@ export function ContractManagement() {
       </div>
 
       {editingContract && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-[720px] max-h-[90vh] overflow-y-auto rounded-2xl bg-white p-6 shadow-xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          {/* 外层只负责圆角裁剪，内层负责滚动，保证四角始终是圆角卡片 */}
+          <div className="flex max-h-[90vh] w-[720px] flex-col overflow-hidden rounded-2xl bg-white shadow-xl">
+            <div className="overflow-y-auto p-6">
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-lg font-semibold">编辑合同信息</h3>
               <button className="text-slate-400 hover:text-slate-600" onClick={() => setEditingContract(null)}>✕</button>
@@ -548,17 +571,11 @@ export function ContractManagement() {
                 </label>
               </div>
               <div className="rounded-lg bg-slate-50 p-4">
-                <h4 className="mb-3 text-sm font-medium text-slate-700">缺勤/工时不足扣款 <span className="text-xs text-slate-400">（扣款系数必填，上限选填）</span></h4>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="text-sm">
-                    <span className="text-red-500">*</span> 缺勤扣款系数
-                    <input type="number" step="0.01" className={inputClass('deduction_coefficient')} value={manualRules.deduction_coefficient} onChange={(e) => { setManualRules({ ...manualRules, deduction_coefficient: e.target.value }); clearFieldError('deduction_coefficient') }} placeholder="如 1.2" />
-                  </label>
-                  <label className="text-sm">
-                    单人单日扣款上限（元）
-                    <input type="number" step="0.01" className="input mt-1 w-full" value={manualRules.daily_cap} onChange={(e) => setManualRules({ ...manualRules, daily_cap: e.target.value })} placeholder="选填" />
-                  </label>
-                </div>
+                <h4 className="mb-3 text-sm font-medium text-slate-700">缺勤/工时不足扣款 <span className="text-xs text-slate-400">（扣款系数必填）</span></h4>
+                <label className="block text-sm">
+                  <span className="text-red-500">*</span> 缺勤扣款系数
+                  <input type="number" step="0.01" className={inputClass('deduction_coefficient')} value={manualRules.deduction_coefficient} onChange={(e) => { setManualRules({ ...manualRules, deduction_coefficient: e.target.value }); clearFieldError('deduction_coefficient') }} placeholder="如 1.2" />
+                </label>
               </div>
             </div>
             {Object.values(validationErrors).some(Boolean) && (
@@ -571,6 +588,7 @@ export function ContractManagement() {
               <button className="btn-primary" disabled={savingRules} onClick={saveManualRules}>
                 {savingRules ? '保存中...' : '保存'}
               </button>
+            </div>
             </div>
           </div>
         </div>

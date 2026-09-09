@@ -124,29 +124,8 @@ def cleanup_project_name(value: str) -> str:
 
 
 def extract_business_type(text: str) -> str:
-    value = extract_first(text, [
-        r"(?:项目属性|业态|业务类型)[:：\s]*([^\n\r，,。；;]{1,12})",
-    ])
-    return normalize_business_type_label(value)
-
-
-def normalize_business_type_label(value: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if "商酒" in text:
-        return "商业"
-    if text in {"商", "商场"} or "商业" in text:
-        return "商业"
-    if text == "住" or "住宅" in text:
-        return "住宅"
-    if "写字楼" in text or "办公" in text:
-        return "写字楼"
-    if "酒店" in text:
-        return "酒店"
-    if "街区" in text or "外场" in text:
-        return "街区"
-    return text
+    """不再从合同文本中解析业态，改为用户手动从项目-业态映射中选择。"""
+    return ""
 
 
 def extract_first(text: str, patterns: list[str]) -> str:

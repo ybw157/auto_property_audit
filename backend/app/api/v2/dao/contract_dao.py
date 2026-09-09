@@ -61,6 +61,26 @@ def get_contract_by_original_name_all(original_name: str) -> ContractRecord | No
         db.close()
 
 
+def get_contract_by_name_and_bt(original_name: str, business_type: str, project_name: str | None = None) -> ContractRecord | None:
+    """按 原始文件名 + 业态（项目账号再加项目名）定位合同。
+
+    用于“解析入库”的去重：同名同业态视为同一份合同（覆盖更新），
+    同名不同业态视为第二份合同（新建）。
+    """
+    db: Session = next(get_db())
+    try:
+        q = db.query(ContractRecord).filter(
+            ContractRecord.original_name == original_name,
+            ContractRecord.business_type == business_type,
+            ContractRecord.is_deleted == 0,
+        )
+        if project_name:
+            q = q.filter(ContractRecord.project_name == project_name)
+        return q.order_by(ContractRecord.id.desc()).first()  # type: ignore[return-value]
+    finally:
+        db.close()
+
+
 def restore_contract(contract_id: int, **fields) -> bool:
     db: Session = next(get_db())
     try:

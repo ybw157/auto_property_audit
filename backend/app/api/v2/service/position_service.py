@@ -19,11 +19,12 @@ def _extract_month_from_filename(filename: str) -> str:
     return ""
 
 
-def upload_and_parse_excel(file: UploadFile) -> dict:
+def upload_and_parse_excel(file: UploadFile, force_project_name: str = "") -> dict:
     """
     上传并解析项目岗位 Excel 表格，将结果存入数据库
 
     :param file: Excel 文件
+    :param force_project_name: 强制使用的项目名（来自登录用户信息），非空时覆盖 Excel 解析出的项目名
     :return: 解析结果
     """
     filename = file.filename or ""
@@ -44,9 +45,13 @@ def upload_and_parse_excel(file: UploadFile) -> dict:
     audit_month = _extract_month_from_filename(filename)
     bi_month = audit_month
 
-    # 赋值月份并保存到数据库（去掉项目名称中的"项目"二字）
+    # 赋值月份并保存到数据库
     for info in position_infos:
-        info.project_name = info.project_name.replace("项目", "")
+        # 如果指定了 force_project_name，直接使用；否则使用 Excel 解析出的项目名（去掉"项目"二字）
+        if force_project_name:
+            info.project_name = force_project_name
+        else:
+            info.project_name = info.project_name.replace("项目", "")
         info.audit_month = audit_month
         position_dao.save_position_info(info)
 
