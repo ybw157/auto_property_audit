@@ -86,7 +86,7 @@ EXTRACT_SYSTEM_PROMPT = """你是一个专业的合同审核专家。请从以�
 3. missing_clock_deduction：漏打卡每次扣多少元
 4. missing_clock_free_times_per_month：每月漏打卡免扣次数
 5. missing_clock_free_requires_attendance_proof：免扣是否需要出勤证明（布尔值）
-6. contract_deduction_coefficient：合同扣款系数（如有）—— S01/S04-4 缺勤脱岗扣款 = 工时单价 × 该系数 × 缺勤总时长
+6. contract_deduction_coefficient：合同扣款系数（如有）—— S01/S04-4 缺勤缺岗扣款 = 工时单价 × 该系数 × 缺勤总时长
 7. attendance_deduction_coefficient：考勤扣款系数（如有）
 8. late_grace_minutes：迟到宽限分钟数（如有）
 9. early_leave_grace_minutes：早退宽限分钟数（如有）

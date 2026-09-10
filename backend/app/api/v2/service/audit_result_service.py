@@ -264,7 +264,7 @@ def start_audit(
             detail=f"合同规则不完整，缺少：{detail}。请先在合同管理中编辑补全后再审核。",
         )
 
-    # 5) 跑 S04 考勤管理扣款审核（人员级：迟到/早退/漏打卡/脱岗）
+    # 5) 跑 S04 考勤管理扣款审核（人员级：迟到/早退/漏打卡/缺岗）
     if s04_rules:
         print(f"\n[步骤5] 执行 S04 考勤扣款审核...")
         s04_audit = run_attendance_s04_audit(
@@ -276,11 +276,11 @@ def start_audit(
             (s04_audit.get("s04_rules", {}) or {}).get("absence_penalty_multiplier")
             or get_absence_coefficient(s04_rules)
         )
-        print(f"  - 脱岗扣款倍数: 当日服务费 × {absence_multiplier}")
+        print(f"  - 缺岗扣款倍数: 当日服务费 × {absence_multiplier}")
         print(f"  - 漏打卡扣款: {s04_summary.get('total_missing_clock_amount', 0)}")
         print(f"  - 迟到扣款: {s04_summary.get('total_late_amount', 0)}")
         print(f"  - 早退扣款: {s04_summary.get('total_early_leave_amount', 0)}")
-        print(f"  - 脱岗扣款: {s04_summary.get('total_absence_amount', 0)}")
+        print(f"  - 缺岗扣款: {s04_summary.get('total_absence_amount', 0)}")
         print(f"  - 总扣款: {s04_summary.get('total_deduction', 0)}")
     else:
         audit_out["s04_attendance_audit"] = {"message": "无 S04 规则，跳过"}
@@ -579,7 +579,7 @@ def finalize_audit(
 
         confirmed_absence_total = 0
         daily_rate = detail.get("absence_daily_rate", 0) or 0
-        # 脱岗扣款倍数：detail 落库的已是 float（来自 audit_attendance_service.run_attendance_s04_audit），
+        # 缺岗扣款倍数：detail 落库的已是 float（来自 audit_attendance_service.run_attendance_s04_audit），
         # 次选 s04_rule_cfg.absence_penalty_multiplier（同源 float），最后兜底 1.0。
         absence_multiplier = float(
             detail.get("absence_multiplier")

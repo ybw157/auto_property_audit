@@ -101,6 +101,21 @@ export function AiAudit() {
     }
   }
 
+  async function autoUploadProject(file: File) {
+    setLoading(true)
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      await request('/api/v2/positions/upload', { method: 'POST', body: form })
+      setUploaded(true)
+      setMessage(`项目基础资料已上传：${file.name}，可点击「开始AI审核」发起审核。`)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '上传失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   function setFile(kind: FileKind, file: File) {
     if (kind === 'project' && !isExcel(file)) {
       setMessage('项目基础资料仅支持上传 .xlsx 文件')
@@ -109,7 +124,8 @@ export function AiAudit() {
     if (kind === 'project') {
       setProjectFile(file)
       setUploaded(false)
-      setMessage(`已选择项目基础资料：${file.name}`)
+      setMessage(`正在上传：${file.name}`)
+      autoUploadProject(file)
       return
     }
   }
@@ -126,7 +142,8 @@ export function AiAudit() {
       if (name.includes('项目') || name.includes('基础')) {
         setProjectFile(file)
         setUploaded(false)
-        setMessage(`已拖入项目基础资料：${file.name}`)
+        setMessage(`正在上传：${file.name}`)
+        autoUploadProject(file)
         return
       } else if (name.includes('bi') || name.includes('考勤')) {
         setMessage('BI考勤无需在页面上传，请由同步程序放入BI_Data目录')
@@ -135,7 +152,8 @@ export function AiAudit() {
     }
     setProjectFile(validFiles[0])
     setUploaded(false)
-    setMessage(`已拖入项目基础资料：${validFiles[0].name}`)
+    setMessage(`正在上传：${validFiles[0].name}`)
+    autoUploadProject(validFiles[0])
   }
 
   function handleFileInput(kind: FileKind, event: ChangeEvent<HTMLInputElement>) {
@@ -163,29 +181,19 @@ export function AiAudit() {
     setDragging(kind)
   }
 
-  async function uploadProjectOnly() {
-    if (!projectFile) return setMessage('请先选择项目基础资料 .xlsx')
-    setLoading(true)
-    try {
-      const form = new FormData()
-      form.append('file', projectFile)
-      await request('/api/v2/positions/upload', { method: 'POST', body: form })
-      setUploaded(true)
-      setMessage(`项目基础资料已上传：${projectFile.name}，可点击「开始AI审核」发起审核。`)
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : '上传失败')
-    } finally {
-      setLoading(false)
-    }
-  }
-
   async function createAndUpload() {
     if (!selectedProjectName) return setMessage('请先选择项目。项目来自系统配置里的项目合同库，请先上传并启用项目合同。')
     if (!auditMonth) return setMessage('请选择审核月份。不同月份天数不同，会影响月度审核和报告统计。')
     if (!projectFile) return setMessage('请先选择项目基础资料')
-    if (!uploaded) return setMessage('请先点击「上传项目资料」完成上传，再开始审核。')
     setLoading(true)
     try {
+      // 若尚未上传，先上传再审核
+      if (!uploaded) {
+        const form = new FormData()
+        form.append('file', projectFile)
+        await request('/api/v2/positions/upload', { method: 'POST', body: form })
+        setUploaded(true)
+      }
       const auditMonthFormatted = auditMonth.replace('-', '')
       const result = await request<StartAuditResult>('/api/v2/audit-results/start', {
         method: 'POST',
@@ -281,7 +289,6 @@ export function AiAudit() {
         </div>
         <div className="mt-6 flex flex-wrap items-center gap-3">
           <button className="btn-primary" disabled={loading} onClick={createAndUpload}>{loading ? '审核中...' : '开始AI审核'}</button>
-          <button className="btn-secondary" disabled={loading || !projectFile} onClick={uploadProjectOnly}>{uploaded ? '重新上传项目资料' : '上传项目资料'}</button>
           <button className="btn-secondary" disabled={loading || !batchId} onClick={resubmitSchedule}>重新提交排班</button>
           <a className="btn-secondary" href={`${API_BASE_URL}/api/v2/templates/project_base`}>下载项目模板</a>
         </div>

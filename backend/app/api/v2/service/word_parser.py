@@ -249,12 +249,12 @@ _DEFAULT_RULES = [
     },
     {
         "code": "S04", "name": "考勤管理", "penalty_type": "composite",
-        "condition": "漏打卡、迟到、早退、脱岗等",
+        "condition": "漏打卡、迟到、早退、缺岗等",
         "sub_rules": [
             {"code": "S04-1", "name": "漏打卡", "amount": 50, "unit": "元/人次", "free_limit": 3, "free_unit": "次/月"},
             {"code": "S04-2", "name": "迟到或早退在30分钟以内", "amount": 20, "unit": "元/次"},
             {"code": "S04-3", "name": "迟到或早退在60分钟以内", "amount": 50, "unit": "元/次"},
-            {"code": "S04-4", "name": "脱岗", "amount": "当日服务费*2.5", "unit": "元"},
+            {"code": "S04-4", "name": "缺岗", "amount": "当日服务费*2.5", "unit": "元"},
         ],
         "enabled": True,
     },

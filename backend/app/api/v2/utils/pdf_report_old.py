@@ -16,6 +16,10 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 
 def register_font():
     candidates = [
+        # macOS - STHeiti, Hiragino, Arial Unicode
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
         # Linux (Docker) - Noto CJK and WenQuanYi
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -138,21 +142,28 @@ def build_attendance_base_tables(results: dict):
     details = results.get("attendance_details", [])
     if not details:
         return []
-    grouped = {}
-    position_time_map = {}
+    # 按员工姓名分组，同一人多岗位合并到一行
+    grouped: dict[str, dict[int, dict]] = {}
+    name_positions: dict[str, set[str]] = {}
+    name_areas: dict[str, set[str]] = {}
     for row in details:
         name = str(row.get("employee_name", ""))
         position = str(row.get("position", ""))
         area = str(row.get("area", ""))
         date_text = str(row.get("work_date", ""))
-        shift = str(row.get("shift", ""))
         if not name or len(date_text) < 10:
             continue
         day = int(date_text[-2:])
-        key = (name, position, area)
-        grouped.setdefault(key, {})[day] = row
-        if shift and not position_time_map.get(key):
-            position_time_map[key] = shift
+        if name not in grouped:
+            grouped[name] = {}
+        # 同一天如果有多岗位，保留有排班时间的那条
+        existing = grouped[name].get(day)
+        if not existing or (not existing.get("shift_start_time") and row.get("shift_start_time")):
+            grouped[name][day] = row
+        if position:
+            name_positions.setdefault(name, set()).add(position)
+        if area:
+            name_areas.setdefault(name, set()).add(area)
     max_day = max((max(by_day.keys()) for by_day in grouped.values()), default=30)
     max_day = min(max_day, 31)
 
@@ -168,12 +179,13 @@ def build_attendance_base_tables(results: dict):
         data = [row0, row1]
         row_styles = []
         cell_styles = []
-        for key_index, ((name, position, area), by_day) in enumerate(sorted(grouped.items()), start=2):
-            shift_info = position_time_map.get((name, position, area), position)
-            data_row = [position, compact_area(area), name]
+        for key_index, (name, by_day) in enumerate(sorted(grouped.items()), start=2):
+            positions = " / ".join(sorted(name_positions.get(name, set())))
+            areas = " / ".join(sorted(name_areas.get(name, set())))
+            data_row = [positions, compact_area(areas), name]
             for d in range(day_start, day_end + 1):
                 item = by_day.get(d)
-                schedule_cell, clock_cell = format_schedule_clock(item, shift_info)
+                schedule_cell, clock_cell = format_schedule_clock(item)
                 data_row.append(schedule_cell)
                 data_row.append(clock_cell)
                 if item and is_exception(item):
@@ -198,6 +210,8 @@ def build_attendance_base_tables(results: dict):
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#CBD5E1")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 1),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 1),
             ("ROWBACKGROUNDS", (0, 2), (-1, -1), [colors.white, colors.white]),
             ("SPAN", (0, 0), (0, 1)),
             ("SPAN", (1, 0), (1, 1)),
@@ -219,17 +233,19 @@ def build_attendance_base_tables(results: dict):
 
 def wrap_half_page_cells(data: list[list[str]], is_header_row0: bool = False):
     header_style = ParagraphStyle("HPHeader", fontName=FONT_NAME, fontSize=5.8, leading=7.0, alignment=1, textColor=colors.HexColor("#1E3A8A"), wordWrap="CJK")
-    body_style = ParagraphStyle("HPBody", fontName=FONT_NAME, fontSize=5.0, leading=6.2, alignment=1, wordWrap="CJK")
+    body_cjk = ParagraphStyle("HPBodyCJK", fontName=FONT_NAME, fontSize=5.0, leading=6.2, alignment=1, wordWrap="CJK")
+    body_ltr = ParagraphStyle("HPBodyLTR", fontName=FONT_NAME, fontSize=5.0, leading=6.2, alignment=1, wordWrap="LTR")
     wrapped = []
     for row_index, row in enumerate(data):
         if row_index <= 1:
             wrapped.append([Paragraph(str(cell).replace("\n", "<br/>") if cell else "", header_style) for cell in row])
         else:
             cells = []
-            for cell in row:
+            for col_idx, cell in enumerate(row):
                 text = str(cell)
-                # 始终用黑色body_style，异常原因靠内联<font color>标签变红
-                cells.append(Paragraph(text.replace("\n", "<br/>") if text else "", body_style))
+                # 前3列(岗位/区域/姓名)用 CJK 换行；后面打卡/排班列用 LTR 换行，避免时间被拆开
+                style = body_cjk if col_idx < 3 else body_ltr
+                cells.append(Paragraph(text.replace("\n", "<br/>") if text else "", style))
             wrapped.append(cells)
     return wrapped
 
@@ -245,9 +261,9 @@ def format_schedule_clock(row: dict | None, shift_info: str = "") -> tuple[str, 
     schedule_text = extract_work_time(raw_shift) or raw_shift
     clock_times = row.get("clock_times", "")
     if isinstance(clock_times, list):
-        clock_text = "\n".join(str(t) for t in clock_times if t)
+        clock_text = " ".join(str(t) for t in clock_times if t)
     else:
-        clock_text = str(clock_times).replace(";", "\n").replace(" ", "\n")
+        clock_text = str(clock_times).replace(";", " ")
     if is_exception(row):
         reason = str(row.get("exception_type") or row.get("exception_reason") or "异常")
         clock_text = f"{clock_text}\n<font color='#C41E3A'>{reason}</font>" if clock_text.strip() else f"<font color='#C41E3A'>{reason}</font>"
@@ -326,7 +342,6 @@ def build_combined_report_pdf(batch_id: int, report_dir: Path, results: dict) ->
     confirmed_count = summary.get("confirmed_count", 0) or 0
     skipped_count = summary.get("skipped_count", 0) or 0
     attendance_deduction = summary.get("attendance_deduction_amount", 0) or 0
-    position_deduction = summary.get("position_deduction_amount", 0) or 0
 
     story = [
         Paragraph(f"外包考勤 AI 审核汇总与扣款报告", s["CNTitle"]),
@@ -342,57 +357,29 @@ def build_combined_report_pdf(batch_id: int, report_dir: Path, results: dict) ->
     # 核心审核指标
     story.append(Paragraph("二、核心审核指标", s["CNHeading"]))
     story.extend(simple_table([
-        ["审核天数", summary.get("audited_days", 0), "岗位数", summary.get("position_count", 0), "排班任务", schedule_count],
-        ["第一次异常数", first_exception_count, "第一次异常率", f"{first_exception_rate}%", "确认后异常数", confirmed_exception_count],
-        ["确认后异常率", f"{confirmed_exception_rate}%", "确认异常条数", confirmed_count, "未确认条数", skipped_count],
-        ["总扣款金额", f"{total_deduction}元", "考勤扣款", f"{attendance_deduction}元", "岗位扣款", f"{position_deduction}元"],
-    ], [24*mm, 32*mm, 24*mm, 32*mm, 24*mm, 32*mm]))
+        ["排班数", schedule_count, "第一次异常数", first_exception_count],
+        ["第一次异常率", f"{first_exception_rate}%", "确认后异常数", confirmed_exception_count],
+        ["确认后异常率", f"{confirmed_exception_rate}%", "总扣款金额", f"{total_deduction}元"],
+    ], [35*mm, 50*mm, 35*mm, 50*mm]))
 
     # 异常率说明
     story.append(Paragraph("三、异常率说明", s["CNHeading"]))
     story.append(Paragraph(f"第一次审核异常率 = 第一次异常数 / 排班任务 = {first_exception_count} / {schedule_count} = {first_exception_rate}%。该数值反映系统初次审核发现的异常比例。", s["CNBody"]))
     story.append(Paragraph(f"确认后异常率 = 确认异常条数 / 排班任务 = {confirmed_exception_count} / {schedule_count} = {confirmed_exception_rate}%。该数值反映项目确认后实际需扣款的异常比例。", s["CNBody"]))
-    story.append(Paragraph(f"本次审核共确认{confirmed_count}条异常，未确认{skipped_count}条，总扣款{total_deduction}元。", s["CNBody"]))
+    story.append(Paragraph(f"本次审核共确认{confirmed_count}条异常，总扣款{total_deduction}元。", s["CNBody"]))
 
     # 审核总结
-    story.append(Paragraph("四、审核总结（可直接复制）", s["CNHeading"]))
+    story.append(Paragraph("四、审核总结与请款说明", s["CNHeading"]))
     story.append(Paragraph(build_copyable_summary(results), s["CNBody"]))
-
-    # 排班审核及扣款明细
-    story.append(Paragraph("五、排班审核及扣款明细", s["CNHeading"]))
-    story.extend(table_flow(build_position_summary_rows(results), "ai_position_summary"))
 
     # 扣款明细
     deductions = results.get("attendance_deductions", [])
     if deductions:
-        story.append(Paragraph("六、扣款明细", s["CNHeading"]))
+        story.append(Paragraph("五、扣款明细", s["CNHeading"]))
         story.extend(table_flow(deductions[:50], "attendance_deductions"))
 
-    # 人员扣款汇总
-    deduction_summary = results.get("deduction_summary", [])
-    if deduction_summary:
-        story.append(Paragraph("七、人员扣款汇总", s["CNHeading"]))
-        # 判断数据格式：如果是按员工汇总格式（有employee_name），用table_flow；否则用simple_table展示总额
-        first = deduction_summary[0] if deduction_summary else {}
-        if "employee_name" in first:
-            story.extend(table_flow(deduction_summary[:30], "deduction_summary"))
-        else:
-            # 总额格式：{position_deduction_amount, attendance_deduction_amount, total_deduction_amount}
-            summary_data = [
-                ["人员考勤扣款", f"{first.get('attendance_deduction_amount', 0)}元"],
-                ["岗位扣款", f"{first.get('position_deduction_amount', 0)}元"],
-                ["合计扣款", f"{first.get('total_deduction_amount', 0)}元"],
-            ]
-            story.extend(simple_table(summary_data, [40*mm, 30*mm]))
-        # 如果有按员工汇总数据，也展示
-        emp_summary = results.get("employee_deduction_summary", [])
-        if emp_summary:
-            story.append(Spacer(1, 6))
-            story.append(Paragraph("按员工扣款汇总：", s["CNBody"]))
-            story.extend(table_flow(emp_summary[:30], "deduction_summary"))
-
     # 管理建议
-    story.append(Paragraph("八、管理建议", s["CNHeading"]))
+    story.append(Paragraph("六、管理建议", s["CNHeading"]))
     for line in build_management_suggestions(results):
         story.append(Paragraph(line, s["CNBody"]))
 
@@ -556,7 +543,7 @@ def simple_table(data: list[list[object]], col_widths: list[float]):
 
 def format_audit_month(value: str) -> str:
     text = str(value or "")
-    match = re.search(r"(\d{4})[-年/](\d{1,2})", text)
+    match = re.search(r"(\d{4})[-年/]?(\d{1,2})", text)
     if not match:
         return text
     year = int(match.group(1))
@@ -574,21 +561,39 @@ def month_days(year: int, month: int) -> int:
 def build_copyable_summary(results: dict) -> str:
     project = results.get("project_info", {}).get("项目名称", "")
     business_type = "、".join(results.get("audit_business_types", [])) or "保洁"
-    # service_type = infer_service_type(results)
     audit_month = format_audit_month(results.get("project_info", {}).get("审核月份") or infer_report_month(results))
     summary = results.get("summary", {})
-    exception_stats = results.get("exception_statistics", [])
-    top_exceptions = "、".join([f"{item.get('employee_name', '')}{item.get('exception_type', '')}{item.get('exception_count', item.get('count', 0))}次" for item in exception_stats[:3]]) or "无明显人员异常"
-    attendance_deduction = summary.get("attendance_deduction_amount", 0) or 0
+    attendance_deductions = results.get("attendance_deductions", [])
+
     total_deduction = summary.get("total_deduction", 0) or 0
-    return (
-        f"{project}{business_type}外包{audit_month}考勤审核完成。"
-        f"本次以月度排班表为唯一审核依据，覆盖{summary.get('audited_days', 0)}个日期、{summary.get('position_count', 0)}类岗位、{summary.get('schedule_task_count', 0)}条排班任务，"
-        f"人员考勤异常{summary.get('exception_count', 0)}人次。"
-        f"重点异常为：{top_exceptions}。"
-        f"人员考勤扣款{attendance_deduction}元，"
-        f"建议扣款合计{total_deduction}元。"
+    first_exception_count = summary.get("exception_count", 0) or 0
+    confirmed_count = summary.get("confirmed_count", 0) or 0
+    confirmed_employees = summary.get("confirmed_exception_count", 0) or 0
+    schedule_count = summary.get("schedule_task_count", 0) or 0
+
+    # 按异常类型汇总扣款金额
+    from collections import defaultdict
+    type_amounts = defaultdict(float)
+    for d in attendance_deductions:
+        etype = d.get("exception_type", "")
+        amt = float(d.get("deduction_amount", 0) or 0)
+        type_amounts[etype] += amt
+    type_names = {"漏打卡": "漏打卡", "迟到": "迟到", "早退": "早退", "缺勤": "缺勤", "中间卡": "中间卡"}
+    parts = [f"{type_names.get(k, k)}扣款{v:g}元" for k, v in type_amounts.items() if v > 0]
+    deduction_detail = "、".join(parts) if parts else ""
+
+    p1 = (
+        f"<b>{project}{business_type}外包{audit_month}考勤审核已完成。</b>"
+        f"本次审核以月度排班表为唯一依据，结合BI考勤打卡数据，"
+        f"覆盖{schedule_count}条排班任务，共发现异常{first_exception_count}人次。"
+        f"经项目确认，最终确认异常{confirmed_count}条，涉及{confirmed_employees}人。"
     )
+    p2 = (
+        f"依据《外包服务合同》约定，确认异常对应的扣款金额为<b>{total_deduction:g}元</b>，"
+        f"应从当月服务费中扣除。"
+    )
+    p3 = f"明细如下：{deduction_detail}。" if deduction_detail else ""
+    return p1 + "<br/><br/>" + p2 + ("<br/><br/>" + p3 if p3 else "")
 
 def build_position_summary_rows(results: dict) -> list[dict]:
     grouped = {}
@@ -681,15 +686,91 @@ def format_detail_schedule_time(detail: dict) -> str:
     return f"{start}-{end}" if start and end else str(detail.get("shift_name", ""))
 
 def build_management_suggestions(results: dict) -> list[str]:
-    deduction = (results.get("deduction_summary") or [{}])[0]
-    exception_stats = results.get("exception_statistics", [])
-    suggestions = [
-        "1.【重要】所有异常均以月度排班表为唯一审核依据；如排班与BI实际出勤不一致，请项目核实并修改月度排班表后重新上传。",
-        "2. 对迟到、早退、漏打卡、工时不足、缺勤等异常，应保留BI原始考勤截图或导出记录。",
-    ]
-    if exception_stats:
-        top = exception_stats[0]
-        suggestions.append(f"3. 本月异常最集中的人员为{top.get('employee_name', '')}，主要问题为{top.get('exception_type', '')}，建议供应商专项复盘。")
-    suggestions.append(f"4. 本月建议扣款{deduction.get('total_deduction_amount', 0)}元，从当月服务费中扣除，并要求供应商签字确认。")
-    suggestions.append("5. 系统不自动判断顶岗、调岗、调休或换班；最终确认结果以项目确认后的最新月度排班表为准。")
+    """根据实际异常数据生成针对性管理建议"""
+    from collections import defaultdict
+    deductions = results.get("attendance_deductions", [])
+
+    # 按异常类型分组
+    by_type = defaultdict(list)
+    for d in deductions:
+        by_type[d.get("exception_type", "")].append(d)
+
+    suggestions = []
+    idx = 1
+
+    # 缺岗/缺勤
+    absence_list = by_type.get("缺岗", []) + by_type.get("缺勤", [])
+    if absence_list:
+        total_amt = sum(float(d.get("deduction_amount", 0) or 0) for d in absence_list)
+        total_ded = float(results.get("summary", {}).get("total_deduction", 1) or 1)
+        pct = round(total_amt / max(total_ded, 1) * 100)
+        # 按岗位汇总
+        pos_counts = defaultdict(int)
+        for d in absence_list:
+            pos = d.get("position", "") or ""
+            if pos:
+                pos_counts[pos] += 1
+        pos_str = "、".join([f"{p}{c}次" for p, c in pos_counts.items()])
+        suggestions.append(
+            f"{idx}. 本月缺岗{len(absence_list)}次（{pos_str}），扣款{total_amt:g}元，"
+            f"占本月总扣款的{pct}%。"
+            f"建议供应商排查消控、内保等关键岗位人员配置，确保满编到岗，避免因人员不足导致缺岗。"
+        )
+        idx += 1
+
+    # 迟到
+    late_list = by_type.get("迟到", [])
+    if late_list:
+        total_amt = sum(float(d.get("deduction_amount", 0) or 0) for d in late_list)
+        names = list(dict.fromkeys(d.get("employee_name", "") for d in late_list))
+        name_str = "、".join(names)
+        details = [d.get("calculation_detail", "") for d in late_list if d.get("calculation_detail")]
+        detail_str = f"（{'、'.join(details)}）" if details else ""
+        suggestions.append(
+            f"{idx}. {name_str}迟到{len(late_list)}次{detail_str}，扣款{total_amt:g}元。"
+            f"建议加强人员考勤意识教育，确保护准时到岗。"
+        )
+        idx += 1
+
+    # 早退
+    early_list = by_type.get("早退", [])
+    if early_list:
+        total_amt = sum(float(d.get("deduction_amount", 0) or 0) for d in early_list)
+        names = list(dict.fromkeys(d.get("employee_name", "") for d in early_list))
+        name_str = "、".join(names)
+        suggestions.append(
+            f"{idx}. {name_str}早退{len(early_list)}次，扣款{total_amt:g}元。"
+            f"建议严格执行交接班制度，确保班次结束后方可离岗。"
+        )
+        idx += 1
+
+    # 漏打卡
+    missing_list = by_type.get("漏打卡", [])
+    if missing_list:
+        total_amt = sum(float(d.get("deduction_amount", 0) or 0) for d in missing_list)
+        names = list(dict.fromkeys(d.get("employee_name", "") for d in missing_list))
+        name_str = "、".join(names)
+        suggestions.append(
+            f"{idx}. {name_str}漏打卡{len(missing_list)}次，扣款{total_amt:g}元。"
+            f"建议督促人员按时打卡，并定期检查BI考勤设备运行状态。"
+        )
+        idx += 1
+
+    # 中间卡
+    mid_list = by_type.get("中间卡", [])
+    if mid_list:
+        total_amt = sum(float(d.get("deduction_amount", 0) or 0) for d in mid_list)
+        names = list(dict.fromkeys(d.get("employee_name", "") for d in mid_list))
+        name_str = "、".join(names)
+        suggestions.append(
+            f"{idx}. {name_str}中间卡异常{len(mid_list)}次，扣款{total_amt:g}元。"
+            f"建议提醒人员在班次中途按时打卡，确保考勤记录完整。"
+        )
+        idx += 1
+
+    # 通用建议
+    suggestions.append(
+        f"{idx}. 建议供应商建立排班表提交前的自查机制，核实人员实际到岗情况，"
+        f"减少排班与实际出勤的差异，从源头降低异常发生率。"
+    )
     return suggestions

@@ -42,9 +42,10 @@ def _map_schedule_position_to_contract(schedule_pos: str) -> str:
     # 先尝试精确匹配
     if cleaned in SCHEDULE_TO_CONTRACT_NAME:
         return SCHEDULE_TO_CONTRACT_NAME[cleaned]
-    # 再尝试模糊匹配（包含关系）
+    # 再尝试前缀匹配（仅当 key 是 cleaned 的前缀且 cleaned 更长时才匹配）
+    # 例如 "领班xxx" → "领班"，但 "夜班领班" 不会误匹配到 "领班"
     for sched_name, contract_name in SCHEDULE_TO_CONTRACT_NAME.items():
-        if sched_name in cleaned or cleaned in sched_name:
+        if len(cleaned) > len(sched_name) and cleaned.startswith(sched_name):
             return contract_name
     return cleaned
 

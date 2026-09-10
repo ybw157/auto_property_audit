@@ -63,10 +63,12 @@ def _bi_day_to_iso(label: Any, audit_month: str) -> str:
     if not digits:
         return ""
     day = int(digits[-2:]) if len(digits) >= 2 else int(digits)
-    try:
-        return f"{audit_month}-{day:02d}"
-    except Exception:
-        return ""
+    m_am = re.match(r"(\d{4})-?(\d{2})", str(audit_month or ""))
+    if m_am:
+        prefix = f"{m_am.group(1)}-{m_am.group(2)}"
+    else:
+        prefix = str(audit_month or "")
+    return f"{prefix}-{day:02d}"
 
 
 def _build_bi_index(bi_records: list[dict], audit_month: str):

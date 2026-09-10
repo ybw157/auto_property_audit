@@ -60,10 +60,12 @@ def _bi_day_to_iso(label: Any, audit_month: str) -> str:
     if not digits:
         return ""
     day = int(digits[-2:]) if len(digits) >= 2 else int(digits)
-    try:
-        return f"{audit_month}-{day:02d}"
-    except Exception:
-        return ""
+    m_am = re.match(r"(\d{4})-?(\d{2})", str(audit_month or ""))
+    if m_am:
+        prefix = f"{m_am.group(1)}-{m_am.group(2)}"
+    else:
+        prefix = str(audit_month or "")
+    return f"{prefix}-{day:02d}"
 
 
 def _next_date(iso_date: str) -> str:
@@ -101,10 +103,10 @@ def extract_s04_rules(contract_rules) -> dict | None:
     return None
 
 
-# 缺勤/缺岗/脱岗扣款复用合同里的"缺编系数"（contract_deduction_coefficient）。
-# 该系数同时作用于 S04-4 脱岗（日服务费 × N）和槽位缺编扣款。
+# 缺勤/缺岗扣款复用合同里的"缺编系数"（contract_deduction_coefficient）。
+# 该系数同时作用于 S04-4 缺岗（日服务费 × N）和槽位缺编扣款。
 def get_absence_coefficient(s04_rules: dict | None) -> float:
-    """从合同规则里取缺编/脱岗扣款倍数（合同字段 contract_deduction_coefficient）。
+    """从合同规则里取缺编/缺岗扣款倍数（合同字段 contract_deduction_coefficient）。
 
     未配置或非正值时按 1.0 处理（= 仅扣日服务费，不加倍）。
     """
@@ -359,7 +361,7 @@ def run_attendance_s04_audit(
         s04_4 = None
         s04_sub = []
 
-    # 缺勤/脱岗扣款倍数：日服务费 × 缺编系数（合同字段 contract_deduction_coefficient）
+    # 缺勤/缺岗扣款倍数：日服务费 × 缺编系数（合同字段 contract_deduction_coefficient）
     absence_multiplier = get_absence_coefficient(s04_rules)
 
     schedule_index, vacancies = _build_schedule_index(position_infos)

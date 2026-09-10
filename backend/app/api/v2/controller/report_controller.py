@@ -25,10 +25,6 @@ def list_reports(
     audit_month: str,
 ):
     project_name = resolve_project_name(request, project_name)
-    # 只展示已确认（locked）审核的报告：未确认的审核不出报告，避免看到草稿版
-    ar = audit_result_dao.get_audit_result(project_name, business_type, audit_month)
-    if not (ar and getattr(ar, "locked", 0)):
-        return Result.ok(data=[])
     reports = report_dao.list_reports(project_name, business_type, audit_month)
     return Result.ok(data=reports)
 
@@ -48,11 +44,6 @@ def generate_report(
     audit_result = audit_result_dao.get_audit_result(project_name, business_type, audit_month)
     if not audit_result:
         raise HTTPException(status_code=404, detail="未找到审核结果")
-    if not getattr(audit_result, "locked", 0):
-        raise HTTPException(
-            status_code=400,
-            detail="审核尚未确认，无法生成报告，请先在审核页确认最终版（确认/锁定）后再生成",
-        )
 
     report_dir = settings.report_dir / project_name
     report_dir.mkdir(parents=True, exist_ok=True)
