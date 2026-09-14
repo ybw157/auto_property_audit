@@ -35,10 +35,11 @@ def get_result_detail(
     project_name: str,
     business_type: str,
     audit_month: str,
+    service_type: str = "",
 ):
     """获取审核结果详情。"""
     project_name = resolve_project_name(request, project_name)
-    data = get_audit_result(project_name, business_type, audit_month)
+    data = get_audit_result(project_name, business_type, audit_month, service_type)
     return Result.ok(data=data)
 
 
@@ -48,10 +49,11 @@ def start_audit_endpoint(
     project_name: str = Body(..., description="项目名称"),
     business_type: str = Body(..., description="业态"),
     audit_month: str = Body(..., description="审核月份，如 202607"),
+    service_type: str = Body("", description="服务类型（保安/保洁）"),
 ):
     """开始审核。"""
     project_name = resolve_project_name(request, project_name)
-    return start_audit(project_name, business_type, audit_month)
+    return start_audit(project_name, business_type, audit_month, service_type)
 
 @router.post("/audit-results/confirm")
 def confirm_audit_endpoint(

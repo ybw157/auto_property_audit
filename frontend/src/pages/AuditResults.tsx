@@ -35,7 +35,7 @@ const columnLabels: Record<string, string> = {
 }
 
 const tabColumns: Record<string, string[]> = {
-  exceptions: ['employee_name', 'position', 'missing_clock_count', 'late_count', 'early_leave_count', 'absence_count', 'absence_daily_rate', 'total_deduction'],
+  exceptions: ['employee_name', 'position', 'missing_clock_count', 'late_count', 'early_leave_count', 'absence_count', 'cross_assignment_warning', 'absence_daily_rate', 'total_deduction'],
   'attendance-deductions': ['employee_name', 'position', 'exception_type', 'deduction_amount'],
   deductions: ['summary_item', 'deduction_amount'],
 }
@@ -55,6 +55,8 @@ export function AuditResults() {
     deductions: [] as Record<string, unknown>[],
     s04Summary: {} as Record<string, unknown>,
     deductionDetails: [] as Record<string, unknown>[],
+    crossProjectReview: [] as Array<Record<string, unknown>>,
+    crossProjectResolved: [] as Array<Record<string, unknown>>,
   })
   const [proofUpdating, setProofUpdating] = useState<string>('')
   const [detailData, setDetailData] = useState<Record<string, unknown> | null>(null)
@@ -62,6 +64,7 @@ export function AuditResults() {
   const projectName = auditContext?.project_name || ''
   const auditMonth = auditContext?.audit_month || ''
   const businessType = auditContext?.business_type || ''
+  const serviceType = auditContext?.service_type || ''
 
   // 当 auditContext 为空时，自动从后端查询最近的审核结果
   useEffect(() => {
@@ -84,6 +87,7 @@ export function AuditResults() {
               project_name: String(latest.project_name || ''),
               audit_month: String(latest.audit_month || ''),
               business_type: String(latest.business_type || ''),
+              service_type: String(latest.service_type || ''),
             }
             setAuditContext(ctx)
           } else {
@@ -103,14 +107,18 @@ export function AuditResults() {
     summary: Record<string, unknown>[]
     s04: Record<string, unknown>
     deductionDetails: Record<string, unknown>[]
+    crossProjectReview: Array<Record<string, unknown>>
+    crossProjectResolved: Array<Record<string, unknown>>
   } {
-    if (!raw || typeof raw !== 'object') return { slotDetails: [], summary: [], s04: {}, deductionDetails: [] }
+    if (!raw || typeof raw !== 'object') return { slotDetails: [], summary: [], s04: {}, deductionDetails: [], crossProjectReview: [], crossProjectResolved: [] }
     const r = raw as Record<string, unknown>
     const slotDetails = Array.isArray(r.slot_details) ? r.slot_details as Record<string, unknown>[] : []
     const summary = Array.isArray(r.summary) ? r.summary as Record<string, unknown>[] : []
     const s04 = (r.s04_attendance_audit && typeof r.s04_attendance_audit === 'object') ? r.s04_attendance_audit as Record<string, unknown> : {}
     const deductionDetails = Array.isArray(s04.deduction_details) ? s04.deduction_details as Record<string, unknown>[] : []
-    return { slotDetails, summary, s04, deductionDetails }
+    const crossProjectReview = Array.isArray(r.cross_project_substitute_review) ? r.cross_project_substitute_review as Array<Record<string, unknown>> : []
+    const crossProjectResolved = Array.isArray(r.cross_project_substitute_resolved) ? r.cross_project_substitute_resolved as Array<Record<string, unknown>> : []
+    return { slotDetails, summary, s04, deductionDetails, crossProjectReview, crossProjectResolved }
   }
 
   function buildTabRows(tabKey: string, parsed: ReturnType<typeof parseResultsJson>): Record<string, unknown>[] {
@@ -170,6 +178,7 @@ export function AuditResults() {
         absence_count: d.absence_count ?? (Array.isArray(d.absence_dates) ? (d.absence_dates as unknown[]).length : 0),
         absence_daily_rate: Number(d.absence_daily_rate || 0),
         total_deduction: Number(d.total_deduction || 0),
+        cross_assignment_count: Array.isArray(d.cross_assignment_warnings) ? d.cross_assignment_warnings.length : 0,
         // 扣款合计的计算公式（仅用于展示，不在 columns 里），如：缺勤1次×日服务费190.68元×1.2
         deduction_formula: buildDeductionFormula(d),
       }))
@@ -224,13 +233,15 @@ export function AuditResults() {
           deductions: buildTabRows('deductions', parsed),
           s04Summary: parsed.s04.summary as Record<string, unknown> || {},
           deductionDetails: parsed.deductionDetails,
+          crossProjectReview: parsed.crossProjectReview,
+          crossProjectResolved: parsed.crossProjectResolved,
         })
         setRows(buildTabRows(tab, parsed))
       })
       .catch(() => {
         setDetailData(null)
         setRows([])
-        setDashboard({ attendanceDetails: [], positionFulfillment: [], exceptions: [], attendanceDeductions: [], deductions: [], s04Summary: {}, deductionDetails: [] })
+        setDashboard({ attendanceDetails: [], positionFulfillment: [], exceptions: [], attendanceDeductions: [], deductions: [], s04Summary: {}, deductionDetails: [], crossProjectReview: [], crossProjectResolved: [] })
       })
   }, [auditContext])
 
@@ -383,8 +394,18 @@ function trimNum(value: number): string {
   return String(Math.round(value * 100) / 100)
 }
 
-/** 人员异常统计表的单元格渲染：扣款合计列在金额下方展示计算公式 */
+/** 人员异常统计表的单元格渲染：扣款合计列在金额下方展示计算公式；串岗警告列显示琥珀色标记 */
 function renderExceptionCell(row: Record<string, unknown>, key: string): ReactNode {
+  if (key === 'cross_assignment_warning') {
+    const warnings = row.cross_assignment_warnings as Array<{ date: string; positions: string[]; message: string }> | undefined
+    if (!warnings || warnings.length === 0) return <span className="text-slate-300">—</span>
+    const title = warnings.map((w) => `${w.date}：${(w.positions || []).join(' / ')}`).join('\n')
+    return (
+      <span title={title} className="inline-flex items-center gap-1 rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+        ⚠ {warnings.length} 天
+      </span>
+    )
+  }
   if (key !== 'total_deduction') return String(row[key] ?? '')
   const amount = toNumber(row.total_deduction)
   const formula = String(row.deduction_formula || '')
@@ -410,6 +431,8 @@ type DashboardData = {
   deductions: Record<string, unknown>[]
   s04Summary: Record<string, unknown>
   deductionDetails: Record<string, unknown>[]
+  crossProjectReview: Array<Record<string, unknown>>
+  crossProjectResolved: Array<Record<string, unknown>>
 }
 
 function AuditDashboard({ data }: { data: DashboardData }) {
@@ -419,8 +442,88 @@ function AuditDashboard({ data }: { data: DashboardData }) {
   const lateAmount = Number(s04Summary.total_late_amount || 0)
   const earlyAmount = Number(s04Summary.total_early_leave_amount || 0)
   const absenceAmount = Number(s04Summary.total_absence_amount || 0)
+  const crossWarnings = data.deductionDetails.flatMap((d) => {
+    const warnings = d.cross_assignment_warnings as Array<{ date: string; positions: string[]; message: string }> | undefined
+    return (warnings || []).map((w) => ({ ...w, employee_name: String(d.employee_name || '') }))
+  })
+  const hasCrossWarnings = crossWarnings.length > 0
   return (
     <div className="space-y-5">
+      {hasCrossWarnings && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <div className="flex items-start gap-2">
+            <span className="text-amber-600 font-medium text-sm">串岗警告</span>
+            <span className="text-amber-500 text-xs">（{crossWarnings.length} 条，当天已跳过扣款）</span>
+          </div>
+          <div className="mt-2 max-h-48 space-y-1 overflow-y-auto">
+            {crossWarnings.map((w, i) => (
+              <div key={i} className="text-sm text-amber-800">
+                <span className="font-medium">{w.employee_name}</span>
+                <span className="mx-1 text-amber-500">|</span>
+                <span>{w.date}</span>
+                <span className="mx-1 text-amber-500">|</span>
+                <span>{w.positions?.join(' / ')}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {(data.crossProjectResolved.length > 0 || data.crossProjectReview.length > 0) && (
+        <div className="rounded-lg border border-sky-200 bg-sky-50 p-4">
+          <div className="flex items-start gap-2">
+            <span className="text-sky-700 font-medium text-sm">跨项目代班核查</span>
+            {data.crossProjectResolved.length > 0 && (
+              <span className="text-sky-500 text-xs">（已自动归并 {data.crossProjectResolved.length} 人）</span>
+            )}
+            {data.crossProjectReview.length > 0 && (
+              <span className="text-sky-500 text-xs">（{data.crossProjectReview.length} 人需人工复核）</span>
+            )}
+          </div>
+          <div className="mt-2 max-h-60 space-y-2 overflow-y-auto">
+            {data.crossProjectResolved.map((r, i) => (
+              <div key={`res-${i}`} className="text-sm text-sky-800">
+                <span className="font-medium">{String(r.schedule_name || '')}</span>
+                <span className="mx-1 text-sky-400">|</span>
+                <span>来源项目 {String(r.source_project_name || '未知')}</span>
+                <span className="mx-1 text-sky-400">|</span>
+                <span>排班日 {(r.scheduled_dates as string[] || []).join('、')}</span>
+                <span className="ml-2 text-sky-500 text-xs">已自动采用其 BI 考勤</span>
+              </div>
+            ))}
+            {data.crossProjectReview.map((r, i) => {
+              const candidates = (r.candidates as Array<Record<string, unknown>>) || []
+              return (
+                <div key={`rev-${i}`} className="rounded border border-sky-200 bg-white/70 p-2">
+                  <div className="text-sm text-sky-900">
+                    <span className="font-medium">{String(r.schedule_name || '')}</span>
+                    <span className="mx-1 text-sky-400">|</span>
+                    <span>排班日 {(r.scheduled_dates as string[] || []).join('、')}</span>
+                    <span className="ml-2 text-sky-600 text-xs">请人工确认代班归属</span>
+                  </div>
+                  <div className="mt-1 space-y-1">
+                    {candidates.map((c, j) => (
+                      <div key={j} className="pl-3 text-xs text-sky-700">
+                        <span className="font-medium">{String(c.employee_name || '')}</span>
+                        <span className="mx-1 text-sky-300">·</span>
+                        <span>工号 {String(c.employee_id || '-')}</span>
+                        <span className="mx-1 text-sky-300">·</span>
+                        <span>原属 {String(c.project_name || '未知')}</span>
+                        <span className="mx-1 text-sky-300">·</span>
+                        <span>
+                          当日打卡 {' '}
+                          {Object.entries((c.clock_by_date as Record<string, string[]>) || {})
+                            .map(([d, cl]) => `${d}: [${cl.join(', ')}]`)
+                            .join('  ') || '无'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
       <div className="grid gap-4 md:grid-cols-5">
         <MetricCard title="总扣款金额" value={`${formatMoney(view.totalDeduction)} 元`} tone="red" helper="人员考勤扣款汇总" />
         <MetricCard title="排班任务" value={`${view.scheduleTaskCount} 条`} tone="amber" helper="以月度排班表为唯一依据" />

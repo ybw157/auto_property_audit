@@ -3,7 +3,7 @@ import { getToken, setToken, clearToken } from '../services/api'
 import {
   fetchUserMe,
   clearConfigCache,
-  invalidateConfig,
+  primeConfig,
   subscribeConfig,
   CONFIG_KEYS,
 } from '../services/configCache'
@@ -53,7 +53,8 @@ export function useAuth() {
     clearConfigCache() // 换账号，清掉上个用户的缓存
     setToken(token)
     setUser(u)
-    invalidateConfig(CONFIG_KEYS.USER_ME, 'session')
+    // 登录接口已返回用户信息，直接落缓存，省掉其他组件挂载时那次 /user/me
+    primeConfig(CONFIG_KEYS.USER_ME, u, 'session')
   }, [])
 
   const logout = useCallback(() => {

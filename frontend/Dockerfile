@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
+ENV NODE_OPTIONS=--max-old-space-size=1024
 RUN npm run build
 
 # 阶段2: Nginx 托管静态文件

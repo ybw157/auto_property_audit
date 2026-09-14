@@ -1,8 +1,49 @@
 """合同文件记录数据访问层。"""
+from datetime import datetime
+
 from sqlalchemy.orm import Session
 
 from app.api.v2.core.database import get_db, now_text
 from app.api.v2.models.contract_models import ContractRecord
+
+
+def _contract_sort_key(contract: ContractRecord) -> tuple[float, int]:
+    """按更新时间排序的 key（更新时间缺失时退回创建时间，再退回 0）。"""
+    dt = getattr(contract, "updated_at", None) or getattr(contract, "created_at", None)
+    ts = 0.0
+    if isinstance(dt, datetime):
+        ts = dt.timestamp()
+    elif isinstance(dt, str):
+        try:
+            ts = datetime.fromisoformat(dt).timestamp()
+        except ValueError:
+            ts = 0.0
+    return (ts, getattr(contract, "id", 0) or 0)
+
+
+def get_latest_active_contract(
+    project_name: str = "",
+    business_type: str = "",
+    service_type: str = "",
+    require_rules: bool = False,
+) -> ContractRecord | None:
+    """取"最近更新"的那份启用合同，而不是列表顺序里的第一条。
+
+    Args:
+        project_name:   项目名（空=不限）
+        business_type:  业态（空=不限）
+        service_type:   服务类型（空=不限，保安/保洁）
+        require_rules:  True 时只考虑已解析出规则的合同
+    """
+    candidates = [
+        c for c in get_contracts(project_name, business_type)
+        if getattr(c, "is_active", 0)
+        and (not require_rules or bool(getattr(c, "rules", None)))
+        and (not service_type or getattr(c, "service_type", "") == service_type)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=_contract_sort_key)
 
 
 def save_contract(contract: ContractRecord) -> int:

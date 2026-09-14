@@ -34,6 +34,7 @@ export function AiAudit() {
     return `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`
   })
   const [businessType, setBusinessType] = useState('')
+  const [serviceType, setServiceType] = useState('')
   const [batchId, setBatchId] = useState<number | null>(null)
   const [message, setMessage] = useState('请上传项目基础资料后开始审核，BI考勤由系统自动读取BI_Data目录')
   const [loading, setLoading] = useState(false)
@@ -88,11 +89,11 @@ export function AiAudit() {
       const result = await request<StartAuditResult>('/api/v2/audit-results/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_name: selectedProjectName, business_type: businessType, audit_month: auditMonthFormatted }),
+        body: JSON.stringify({ project_name: selectedProjectName, business_type: businessType, service_type: serviceType, audit_month: auditMonthFormatted }),
       })
       setBatchId(result.version ?? null)
       setMessage(`排班已重新提交，批次 ${result.version} 状态已改为待重新审核。集团管理员可重新点击开始AI审核。`)
-      const ctx: AuditContext = { project_name: selectedProjectName, audit_month: auditMonthFormatted, business_type: businessType }
+      const ctx: AuditContext = { project_name: selectedProjectName, audit_month: auditMonthFormatted, business_type: businessType, service_type: serviceType }
       setAuditContext(ctx)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '重新提交失败')
@@ -198,7 +199,7 @@ export function AiAudit() {
       const result = await request<StartAuditResult>('/api/v2/audit-results/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_name: selectedProjectName, business_type: businessType, audit_month: auditMonthFormatted }),
+        body: JSON.stringify({ project_name: selectedProjectName, business_type: businessType, service_type: serviceType, audit_month: auditMonthFormatted }),
       })
       setBatchId(result.version ?? null)
       // 统一口径：异常率 = 异常记录数 / 排班任务数
@@ -206,7 +207,7 @@ export function AiAudit() {
       const exceptionCount = result.exception_count || 0
       const exceptionRate = scheduleTaskCount > 0 ? ((exceptionCount / scheduleTaskCount) * 100).toFixed(1) : '0.0'
       setMessage(`审核完成：异常率 ${exceptionRate}%`)
-      const ctx: AuditContext = { project_name: selectedProjectName, audit_month: auditMonthFormatted, business_type: businessType }
+      const ctx: AuditContext = { project_name: selectedProjectName, audit_month: auditMonthFormatted, business_type: businessType, service_type: serviceType }
       setAuditContext(ctx)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '审核失败')
@@ -273,6 +274,15 @@ export function AiAudit() {
               ))}
             </select>
             <p className="mt-2 text-xs text-slate-500">不同业态对应不同合同。选择后仅审核该业态的排班和考勤。</p>
+          </div>
+          <div className="mt-4">
+            <label className="block text-sm font-medium text-slate-700">选择服务类型</label>
+            <select className="input mt-2 w-full" value={serviceType} onChange={(event) => setServiceType(event.target.value)}>
+              <option value="">全部服务类型</option>
+              <option value="保安">保安</option>
+              <option value="保洁">保洁</option>
+            </select>
+            <p className="mt-2 text-xs text-slate-500">不同服务类型对应不同合同。选择后仅审核该服务类型的排班和考勤。</p>
           </div>
         </div>
         <div className="mt-6 grid grid-cols-1 gap-4">

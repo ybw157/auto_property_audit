@@ -13,6 +13,16 @@ from app.api.v2.models.contract_models import ContractRecord
 logger = logging.getLogger(__name__)
 
 
+def _rules_complete(rules) -> bool:
+    """细则是否包含审核前置校验必需的字段（迟到/早退分档 + 漏打卡扣款）。"""
+    if not isinstance(rules, dict):
+        return False
+    has_late_early = "late_early_tiers" in rules or (
+        "late_deduction_per_minute" in rules and "early_leave_deduction_per_minute" in rules
+    )
+    return has_late_early and "missing_clock_deduction" in rules
+
+
 def upload_contract(file: UploadFile, project_name: str = "", force_project_name: bool = False) -> dict:
     """上传合同文件。
 
@@ -144,6 +154,103 @@ def _parse_word_and_save(original_name: str, ext: str, storage_path: str, projec
             contract_name="", service_type="", version="", start_date="", end_date="",
             rules=[], extract_status="failed",
         )
+
+
+def parse_contract_only(file: UploadFile, project_name: str = "", force_project_name: bool = False) -> dict:
+    """上传 → 解析 → 返回字段 + temp_file 临时路径，**不建库记录**。
+
+    临时文件以 tmp_ 前缀存放在合同目录，等前端在细则卡片里确认后
+    凭 temp_file 调 create_contract 转正入库；期间取消/关页面都不会
+    污染数据库，也不会覆盖已有合同。
+    """
+    settings.contract_dir.mkdir(parents=True, exist_ok=True)
+
+    original_name = file.filename or "contract"
+    _, ext = os.path.splitext(original_name)
+    ext = ext.lower()
+    if ext not in (".pdf", ".docx", ".doc", ".txt"):
+        raise HTTPException(status_code=400, detail="仅支持 PDF、Word、TXT 文件")
+
+    tmp_path = settings.contract_dir / f"tmp_{uuid.uuid4().hex[:12]}{ext}"
+    tmp_path.write_bytes(file.file.read())
+
+    parsed: dict = {}
+    try:
+        if ext == ".pdf":
+            from app.api.v2.service.pdf_parser import extract_contract_metadata
+            parsed = extract_contract_metadata(tmp_path, original_name)
+        elif ext in (".doc", ".docx"):
+            from app.api.v2.service.word_parser import parse_contract
+            parsed = parse_contract(str(tmp_path), original_name, ext)
+    except Exception as e:
+        # 解析失败也返回草稿（字段为空），让用户在卡片里手填，临时文件保留
+        logger.error(f"合同解析异常(未入库草稿): {e}")
+        parsed = {}
+
+    rules = parsed.get("rules", {})
+    return {
+        "original_name": original_name,
+        "temp_file": str(tmp_path),
+        "project_name": _resolve_project_name(parsed.get("project_name"), project_name, force_project_name),
+        "business_type": parsed.get("business_type", ""),
+        "supplier": parsed.get("supplier", ""),
+        "contract_no": parsed.get("contract_no", ""),
+        "contract_name": parsed.get("contract_name") or original_name,
+        "service_type": parsed.get("service_type", ""),
+        "version": parsed.get("version", ""),
+        "start_date": parsed.get("start_date", ""),
+        "end_date": parsed.get("end_date", ""),
+        "rules": rules,
+        "extract_status": "done" if _rules_complete(rules) else "failed",
+    }
+
+
+def create_contract(
+    temp_file: str,
+    original_name: str,
+    project_name: str = "",
+    force_project_name: bool = False,
+    **fields,
+) -> dict:
+    """凭 temp_file 把解析草稿转正入库。
+
+    去重键 = 原始文件名 + 业态（项目账号再叠加项目名）：
+    - 同名 + 同业态   → 覆盖更新同一条记录
+    - 同名 + 不同业态 → 新建第二条独立合同
+    """
+    tmp = Path(temp_file)
+    if not tmp.exists():
+        raise HTTPException(status_code=400, detail="解析草稿的临时文件已失效，请重新上传解析")
+    if tmp.parent != settings.contract_dir or not tmp.name.startswith("tmp_"):
+        raise HTTPException(status_code=400, detail="临时文件不合法，请重新上传解析")
+    ext = tmp.suffix.lower()
+    if ext not in (".pdf", ".docx", ".doc", ".txt"):
+        raise HTTPException(status_code=400, detail="临时文件格式不支持")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    final_path = settings.contract_dir / f"contract_{timestamp}_{uuid.uuid4().hex[:8]}{ext}"
+    os.replace(tmp, final_path)
+
+    fields.pop("temp_file", None)
+    fields["file_format"] = ext.lstrip(".")
+    fields["storage_path"] = str(final_path)
+    fields["project_name"] = _normalize_project_name(project_name or "")
+    fields.setdefault("extract_status", "done" if _rules_complete(fields.get("rules")) else "failed")
+
+    # 同名同业态视为同一份合同（覆盖更新）；同名不同业态是第二份合同（新建）
+    lookup_project = project_name if force_project_name else ""
+    existing = contract_dao.get_contract_by_name_and_bt(
+        original_name, fields.get("business_type", ""), lookup_project
+    )
+    if existing:
+        contract_dao.update_contract_full(existing.id, **fields)
+        updated = contract_dao.get_contract_by_id(existing.id)
+        return updated.to_dict() if updated else {}
+
+    record = ContractRecord(original_name=original_name, **fields)
+    record_id = contract_dao.save_contract(record)
+    record.id = record_id
+    return record.to_dict()
 
 
 def _run_extraction(contract_id: int, storage_path: str):

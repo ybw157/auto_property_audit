@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { request } from '../services/api'
+import { fetchContracts } from '../services/configCache'
 
 type BiSyncRecord = {
   project_name: string
@@ -26,7 +27,8 @@ export function BiSync() {
   const [message, setMessage] = useState('')
 
   useEffect(() => {
-    request<any[]>('/api/v2/contracts').then((rows) => {
+    // 走缓存：合同列表由 configCache 统一管理，写操作后会自动失效重拉
+    fetchContracts<any[]>().then((rows) => {
       const seen = new Set<string>()
       const list: MasterProject[] = []
       for (const r of rows) {

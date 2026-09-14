@@ -14,8 +14,6 @@ from typing import Any
 
 from app.api.v2.models.position_models import PositionInfo, Position, ScheduleSlot
 from app.api.v2.utils.audit_common import (
-    normalize_position_name,
-    normalize_business_type,
     classify_schedule_cell,
     strip_position_time_suffix,
 )
@@ -116,7 +114,7 @@ def parse_schedule_sheet(wb, audit_month: str) -> list[tuple[ScheduleSlot, str, 
     """把月度排班表解析为「排班槽位」列表，返回 (slot, position_name, raw_position, business_type) 元组。
 
     position_name 和 raw_position 仅用于匹配挂接，挂接后丢弃。
-    business_type 用于将占位岗位挂到正确的业态下。
+    business_type 用于按业态优先匹配编制表岗位。
     """
     sheet_name = _find_sheet(wb.sheetnames, wb, SCHEDULE_ALIASES)
     if not sheet_name:
@@ -144,7 +142,7 @@ def parse_schedule_sheet(wb, audit_month: str) -> list[tuple[ScheduleSlot, str, 
 
     day_columns = [(idx, day) for idx, h in enumerate(headers) if (day := _parse_day_header(h)) is not None]
 
-    result: list[tuple[ScheduleSlot, str, str]] = []
+    result: list[tuple[ScheduleSlot, str, str, str]] = []
     current_business = ""
     slot_counter: dict[str, int] = {}
     for source_row_no in range(header_row_idx + 2, len(rows) + 1):
@@ -177,19 +175,21 @@ def parse_schedule_sheet(wb, audit_month: str) -> list[tuple[ScheduleSlot, str, 
             slot_index=slot_counter[counter_key],
             daily=daily,
         )
-        result.append((slot, position, raw_position))
+        result.append((slot, position, raw_position, current_business))
     return result
 
 
 def _attach_slots_to_positions(
     position_infos: list[PositionInfo],
-    slot_tuples: list[tuple[ScheduleSlot, str, str]],
+    slot_tuples: list[tuple[ScheduleSlot, str, str, str]],
 ) -> int:
     """把排班槽位挂到对应岗位（岗位表的子表），返回未匹配到编制表岗位的槽位数。
 
-    同名岗位按出现顺序轮询分配槽位，避免所有槽位都挂到第一个同名岗位上。
-    slot_tuples: (slot, position_name, raw_position)，后两个仅用于匹配，挂接后丢弃。
+    匹配策略：优先按 (业态, 岗位名) 精确匹配编制表岗位；同业态无匹配时
+    fallback 到不限业态的轮询匹配，兼容排班表业态与编制表业态不一致的情况。
+    slot_tuples: (slot, position_name, raw_position, business_type)。
     """
+    # pos_index: strip 后岗位名 → [(业态, Position), ...]
     pos_index: dict[str, list] = {}
     for pi in position_infos:
         for p in pi.positions:
@@ -199,30 +199,40 @@ def _attach_slots_to_positions(
     name_counter: dict[str, int] = {}
 
     unmatched = 0
-    for slot, position_name, _raw_position in slot_tuples:
+    for slot, position_name, _raw_position, business_type in slot_tuples:
         contract_pos_name = _map_schedule_position_to_contract(position_name)
         np_ = strip_position_time_suffix(contract_pos_name)
-        cands = pos_index.get(np_)
+        candidates = pos_index.get(np_)
         target = None
-        if cands:
-            idx = name_counter.get(np_, 0) % len(cands)
+        if candidates:
+            # 优先匹配同业态
+            same_biz = [c for c in candidates if c[0] == business_type]
+            pool = same_biz if same_biz else candidates
+            idx = name_counter.get(np_, 0) % len(pool)
             name_counter[np_] = idx + 1
-            target = cands[idx][1]
+            target = pool[idx][1]
         if target is None:
-            target = _ensure_synthetic_position(position_infos, position_name)
+            target = _ensure_synthetic_position(position_infos, position_name, business_type)
             unmatched += 1
         if target is not None:
             target.slots.append(slot)
     return unmatched
 
 
-def _ensure_synthetic_position(position_infos: list[PositionInfo], position_name: str) -> Position | None:
-    """排班表有岗位但编制表里没有时，生成占位岗位保留数据。"""
+def _ensure_synthetic_position(position_infos: list[PositionInfo], position_name: str, business_type: str = "") -> Position | None:
+    """排班表有岗位但编制表里没有时，生成占位岗位保留数据，挂到同业态的 PositionInfo 下。"""
     if not position_infos:
         return None
-    pi = position_infos[0]
+    target_pi = None
+    if business_type:
+        for pi in position_infos:
+            if pi.business_type == business_type:
+                target_pi = pi
+                break
+    if target_pi is None:
+        target_pi = position_infos[0]
     pos = Position(position_name=position_name)
-    pi.positions.append(pos)
+    target_pi.positions.append(pos)
     return pos
 
 
@@ -291,6 +301,10 @@ def _safe_float(value, default=0.0) -> float:
     try:
         return float(value)
     except (ValueError, TypeError):
+        # 尝试从带中文的字符串中提取数字，如 "56岗69人" → 56
+        nums = re.findall(r"\d+(?:\.\d+)?", str(value))
+        if nums:
+            return float(nums[0])
         return default
 
 
@@ -420,7 +434,7 @@ def _parse_contract_positions(ws) -> list[tuple[str, Position]]:
         if biz_type:
             last_biz_type = biz_type
 
-        def _col(name, default=""):
+        def _col(name: str, default: Any = "") -> Any:
             idx = col_map.get(name)
             if idx is None or idx >= len(row):
                 return default

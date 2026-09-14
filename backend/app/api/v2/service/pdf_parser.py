@@ -33,13 +33,13 @@ def extract_contract_period(text: str) -> tuple[str, str]:
 
     匹配优先级：
     1. 找第一行形如『合同期限：xxxx 至 xxxx』的内容
-    2. 从该行内提取两个 YYYY-MM-DD 形式日期
+    2. 从该行内提取两个 YYYY-MM-DD 形式日期（OCR 场景日期常带空格，如"2025 年 12 月 1 日"）
     """
     m = re.search(r"合同期限[:：\s]*([^\n\r]{2,120})", text)
     if not m:
         return "", ""
     line = m.group(1)
-    dates = re.findall(r"\d{4}[年/\-.]\d{1,2}[月/\-.]\d{1,2}", line)
+    dates = re.findall(r"\d{4}\s*[年/\-.]\s*\d{1,2}\s*[月/\-.]\s*\d{1,2}", line)
     if len(dates) >= 2:
         return normalize_date_text(dates[0]), normalize_date_text(dates[1])
     return "", ""
@@ -52,6 +52,8 @@ def extract_contract_text(path: Path) -> str:
         reader = PdfReader(str(path))
         # 用 \f（form feed）分隔每页，extract_supplier 借此只读第一页乙方字段
         text = "\f".join(page.extract_text() or "" for page in reader.pages)
+        # 显式关闭 reader 释放文件句柄，避免 Windows 下 os.replace 报 PermissionError
+        reader.close()
         stripped = text.strip()
         meaningful_chars = len(
             stripped.replace("契约锁", "").replace(" ", "").replace("\n", "").replace("\r", "").replace("\f", "")
@@ -83,12 +85,13 @@ def ocr_pdf_text(path: Path) -> str:
         if tesseract_cmd:
             pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
-        pdf = pdfium.PdfDocument(str(path))
-        texts = []
-        for index in range(len(pdf)):
-            page = pdf[index]
-            image = page.render(scale=2.0).to_pil()
-            texts.append(pytesseract.image_to_string(image, lang="chi_sim", config="--psm 6"))
+        # 使用 with 语句确保文件句柄被正确关闭
+        with pdfium.PdfDocument(str(path)) as pdf:
+            texts = []
+            for index in range(len(pdf)):
+                page = pdf[index]
+                image = page.render(scale=2.0).to_pil()
+                texts.append(pytesseract.image_to_string(image, lang="chi_sim", config="--psm 6"))
         return "\n".join(texts)
     except Exception as e:
         logger.error(f"OCR 解析失败: {e}")
@@ -102,7 +105,8 @@ def extract_project_name(text: str) -> str:
         r"服务项目[:：\s]*([^\n\r，,。；;]{2,50})",
         r"项目(?!(?:名称|编号|周期|性质|属性|概况|简介|负责|经理|总监|地址|地点|位置|类型|内容|说明|范围|概述|代码|类别|分类|管理|主管|所在))[:：\s]+([^\n\r，,。；;]{2,50})",
     ])
-    if explicit:
+    # OCR 噪声过滤：截到"…以外的其他保"这类断句碎片时视为无效，走兜底关键词
+    if explicit and not re.search(r"以外的|其他保|等内容|等相关", explicit):
         return cleanup_project_name(explicit)
     match = re.search(
         r"([\u4e00-\u9fa5A-Za-z0-9（）()·\-]{2,40}(?:项目|广场|中心|大厦|园区|小区|天地|综合体))", text
@@ -231,6 +235,12 @@ def extract_contract_rules(text: str) -> dict:
             if fuzzy_tier:
                 rules["late_early_tiers"] = fuzzy_tier["tiers"]
                 rules["late_early_over_minutes_as_absence"] = fuzzy_tier["over_minutes"]
+            else:
+                # 小时分档兜底：1小时以内50元、2小时以内100元、超过2小时按缺岗
+                hour_tier = extract_hour_late_early_tiers(normalized)
+                if hour_tier:
+                    rules["late_early_tiers"] = hour_tier["tiers"]
+                    rules["late_early_over_minutes_as_absence"] = hour_tier["over_minutes"]
 
     late = re.search(
         r"迟到[^。；;\n\r]{0,80}?(?:每(?:分钟|分)|按分钟|/分钟|每分钟扣)[^0-9]{0,12}(\d+(?:\.\d+)?)\s*元",
@@ -246,11 +256,13 @@ def extract_contract_rules(text: str) -> dict:
         rules["early_leave_deduction_per_minute"] = early.group(1)
 
     missing_free = re.search(
-        r"每人每月累计(?:漏打卡|未打卡|缺卡)次数超过(\d+)次,?扣除标准[为:：,，]*(\d+(?:\.\d+)?)元/人次",
+        r"每人每月累计(?:漏打卡|未打卡|缺卡)次数超过\s*([一二两三四五六\d]+)\s*次[，,]?\s*扣除标准[为:：,，]*\s*(\d+(?:\.\d+)?)\s*元/人次",
         normalized,
     )
     if missing_free:
-        rules["missing_clock_free_times_per_month"] = float(missing_free.group(1))
+        free_times = _cn_or_digit_int(missing_free.group(1))
+        if free_times:
+            rules["missing_clock_free_times_per_month"] = float(free_times)
         rules["missing_clock_deduction"] = missing_free.group(2)
     if "missing_clock_deduction" not in rules:
         fuzzy_missing = fuzzy_extract_missing_clock_deduction(normalized)
@@ -258,10 +270,21 @@ def extract_contract_rules(text: str) -> dict:
             rules["missing_clock_deduction"] = fuzzy_missing
     if "missing_clock_free_times_per_month" not in rules:
         free_match = re.search(
-            r"(?:前|超过)(\d+)次[^。；;]{0,30}?(?:不扣款|免扣|需提供出勤证明)", normalized
+            r"(?:前|超过)\s*([一二两三四五六\d]+)\s*次[^。；;]{0,30}?(?:不扣款|免扣|需提供出勤证明)", normalized
         )
         if free_match:
-            rules["missing_clock_free_times_per_month"] = float(free_match.group(1))
+            free_times = _cn_or_digit_int(free_match.group(1))
+            if free_times:
+                rules["missing_clock_free_times_per_month"] = float(free_times)
+    if "missing_clock_free_times_per_month" not in rules:
+        # "三次以内不做扣款" / "3次以内不扣款" 这类倒叙写法
+        free_match = re.search(
+            r"([一二两三四五六\d]+)\s*次以内[^。；;]{0,20}?(?:不做?扣款|免扣)", normalized
+        )
+        if free_match:
+            free_times = _cn_or_digit_int(free_match.group(1))
+            if free_times:
+                rules["missing_clock_free_times_per_month"] = float(free_times)
     proof_required = re.search(
         r"(?:在提供有效出勤证明的前提下|有出勤(?:凭证|证明|证)的情况下)[^。；;]{0,40}(?:三次以内|两次以内|前\d+次|月度\d+次内)[^。；;]{0,20}不做扣款",
         normalized,
@@ -351,6 +374,54 @@ def fuzzy_extract_missing_clock_deduction(normalized: str) -> str | None:
     return None
 
 
+def _cn_or_digit_int(value: str) -> int | None:
+    """中文数字/阿拉伯数字转 int（OCR 里"3次"和"三次"都常见）。"""
+    value = str(value or "").strip()
+    if not value:
+        return None
+    cn = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+    if value in cn:
+        return cn[value]
+    m = re.search(r"\d+", value)
+    return int(m.group(0)) if m else None
+
+
+def extract_hour_late_early_tiers(normalized: str) -> dict | None:
+    """按『小时』分档的迟到/早退扣款提取（分钟档提取失败后的兜底）。
+
+    典型原文：迟到或早退1小时以内50元/人次、迟到或早退2小时以内100元/人次、超过2小时按缺岗处理
+    返回 {"tiers": [{max_minutes, amount}, ...], "over_minutes": int} 或 None。
+    """
+    tiers: list[dict] = []
+    for m in re.finditer(
+        r"迟到或早退\s*([!1一二两三四五六\d]+)\s*小[时吋]\s*以内[^0-9]{0,6}?"
+        r"(\d+(?:\.\d+)?)\s*元/[次人次]{1,2}",
+        normalized,
+    ):
+        hours = _cn_or_digit_int(m.group(1))
+        if not hours:
+            continue
+        minutes = hours * 60
+        if not any(t["max_minutes"] == minutes for t in tiers):
+            tiers.append({"max_minutes": minutes, "amount": float(m.group(2))})
+    if not tiers:
+        return None
+
+    tiers.sort(key=lambda t: t["max_minutes"])
+    over_minutes = None
+    m = re.search(
+        r"超过\s*([!1一二两三四五六\d]+)\s*小[时吋][^。；;]{0,6}?按?缺[勤岗]",
+        normalized,
+    )
+    if m:
+        hours = _cn_or_digit_int(m.group(1))
+        if hours:
+            over_minutes = hours * 60
+    if over_minutes is None:
+        over_minutes = max(t["max_minutes"] for t in tiers)
+    return {"tiers": tiers, "over_minutes": over_minutes}
+
+
 def extract_shortage_coefficient(normalized: str) -> str | None:
     for m in re.finditer(r"工时单价([^。；;]{0,30}?)(?:缺勤|铁勤)总时长", normalized):
         middle = m.group(1)
@@ -412,6 +483,10 @@ def normalize_rule_text(text: str) -> str:
     value = re.sub(r'包[^括]{0,5}括', '包括', value)
     value = value.replace("超过!小时", "超过1小时").replace("超过!小", "超过1小")
     value = re.sub(r'迟到[武或戊戌则]早[逆退迹追逾迟迫]', '迟到或早退', value)
+    value = re.sub(r'[壕濠豪]到或早[进退迹]', '迟到或早退', value)
+    value = re.sub(r'[遅迗]到或早退', '迟到或早退', value)
+    value = re.sub(r'超过\s*!\s*小时', '超过1小时', value)
+    value = re.sub(r'[按接技]缺[岗勤]处理', lambda m: '按缺勤处理' if m.group(0).endswith('勤') else '按缺岗处理', value)
     value = re.sub(r'扣[院陈降险]标准', '扣除标准', value)
     value = re.sub(r'[湘漾溥漪湖渑湾]打卡', '漏打卡', value)
     value = re.sub(r'[跌狒铁勇]勤', '缺勤', value)

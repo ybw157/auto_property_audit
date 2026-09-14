@@ -2,6 +2,7 @@ export type AuditContext = {
   project_name: string
   audit_month: string
   business_type: string
+  service_type: string
 }
 
 export type LoginUser = {

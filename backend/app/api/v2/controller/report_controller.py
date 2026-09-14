@@ -48,23 +48,17 @@ def generate_report(
     report_dir = settings.report_dir / project_name
     report_dir.mkdir(parents=True, exist_ok=True)
 
-    # 取启用中的合同，用于报告头部的合同编号/供应商/合同名称
+    # 取启用中的合同（同项目多份时取最近更新的那份），用于报告头部的合同编号/供应商/合同名称
+    matched = contract_dao.get_latest_active_contract(project_name, business_type)
+    if matched is None:
+        all_contracts = contract_dao.get_contracts(project_name, business_type)
+        matched = all_contracts[0] if all_contracts else None
     contract = None
-    contracts = contract_dao.get_contracts(project_name, business_type)
-    for c in contracts:
-        if getattr(c, "is_active", 0):
-            contract = {
-                "contract_no": getattr(c, "contract_no", ""),
-                "supplier": getattr(c, "supplier", ""),
-                "contract_name": getattr(c, "contract_name", "未匹配"),
-            }
-            break
-    if contract is None and contracts:
-        c = contracts[0]
+    if matched is not None:
         contract = {
-            "contract_no": getattr(c, "contract_no", ""),
-            "supplier": getattr(c, "supplier", ""),
-            "contract_name": getattr(c, "contract_name", "未匹配"),
+            "contract_no": getattr(matched, "contract_no", ""),
+            "supplier": getattr(matched, "supplier", ""),
+            "contract_name": getattr(matched, "contract_name", "未匹配"),
         }
 
     results_data = json_loads(audit_result.results_json, {})

@@ -12,6 +12,7 @@ class AuditResult(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     project_name: Mapped[str] = mapped_column(String(255), nullable=False)
     business_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    service_type: Mapped[str] = mapped_column(String(50), default="")
     audit_month: Mapped[str] = mapped_column(String(10), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="待审核")
     version: Mapped[int] = mapped_column(Integer, default=1)

@@ -7,6 +7,8 @@ from fastapi.responses import FileResponse
 from app.api.v2.core.result import Result
 from app.api.v2.service.contract_service import (
     upload_contract,
+    parse_contract_only,
+    create_contract,
     list_contracts,
     get_contract,
     update_rules,
@@ -21,6 +23,7 @@ from app.api.v2.dto.requests import (
     ContractRulesUpdateRequest,
     ContractStatusUpdateRequest,
     ContractUpdateRequest,
+    ContractCreateRequest,
 )
 from app.api.v2.utils.business_type_mapping import (
     get_business_type_mapping,
@@ -39,6 +42,53 @@ def get_business_types(project_name: str = ""):
         "projects": list(get_business_type_mapping().keys()),
         "mapping": get_business_type_mapping(),
     })
+
+
+@router.post("/contracts/parse")
+async def parse_contract_file(
+    request: Request,
+    file: UploadFile = File(...),
+):
+    """上传 → 解析 → 返回字段 + temp_file，不入库。
+
+    前端把返回写入草稿缓存并弹出细则编辑卡片；确认后凭 temp_file
+    调 POST /contracts 转正入库。取消编辑不影响数据库。
+    """
+    user = get_current_user(request)
+    data = parse_contract_only(
+        file=file,
+        project_name=user.get("project_name", ""),
+        force_project_name=not is_admin(user),
+    )
+    return Result.ok(data=data)
+
+
+@router.post("/contracts")
+async def create_contract_record(
+    request: Request,
+    body: ContractCreateRequest,
+):
+    """凭解析草稿的 temp_file 把合同转正入库。
+
+    去重键 = 原始文件名 + 业态（项目账号再叠加项目名）：
+    同名同业态覆盖更新；同名不同业态新建第二份合同。
+    """
+    user = get_current_user(request)
+    force = not is_admin(user)
+    # 非管理员强制使用登录账号的项目名；管理员用卡片里选的项目
+    project_name = user.get("project_name", "") if force else (body.project_name or "")
+    fields = {
+        k: v for k, v in body.model_dump().items()
+        if k not in ("temp_file", "original_name", "project_name") and v is not None
+    }
+    data = create_contract(
+        temp_file=body.temp_file,
+        original_name=body.original_name,
+        project_name=project_name,
+        force_project_name=force,
+        **fields,
+    )
+    return Result.ok(data=data, message="合同已入库")
 
 
 @router.post("/contracts/upload")

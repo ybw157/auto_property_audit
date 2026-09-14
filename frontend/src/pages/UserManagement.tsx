@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Users, UserPlus, RefreshCw, Trash2, KeyRound, Copy, Check, X } from 'lucide-react'
 import { request } from '../services/api'
+import { fetchContracts } from '../services/configCache'
 
 type User = {
   id: number
@@ -63,7 +64,7 @@ export function UserManagement() {
 
   async function loadProjects() {
     try {
-      const contracts = await request<any[]>('/api/v2/contracts')
+      const contracts = await fetchContracts<any[]>()
       const seen = new Set<string>()
       const list: Project[] = []
       for (const c of contracts) {

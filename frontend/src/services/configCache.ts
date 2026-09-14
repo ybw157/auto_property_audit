@@ -7,8 +7,13 @@
  * 解决策略：
  *  1. 首次拉取后写入浏览器存储（localStorage / sessionStorage），后续直接读缓存；
  *  2. 进程内 in-flight 去重 —— 多个组件同时挂载时，同一 key 只发一个真实请求；
- *  3. stale-while-revalidate —— 有缓存先用旧值秒回渲染，同时后台静默刷新；
- *  4. 写操作（新增/编辑/删除合同、登录登出）后主动 invalidate，保证数据新鲜。
+ *  3. cache-first（默认）：有缓存就直接返回，【不发任何请求】。
+ *     只有两种情况下才会真正打接口：
+ *       a) 写操作后主动 invalidateConfig()，下一个调用方重新拉；
+ *       b) 缓存超过 maxAge（硬过期，默认 2h），兜底防止数据永久陈旧。
+ *     注：早期版本用 stale-while-revalidate，导致缓存一过期就后台刷新，
+ *     页面频繁切换时表现为"一直在调接口"，已改为默认关闭。
+ *  4. 应用挂载时由 AuthGuard 调 preloadConfigs() 统一灌一次，页面挂载即命中缓存。
  */
 import { request } from './api'
 import type { LoginUser } from '../types'
@@ -22,8 +27,11 @@ export const CONFIG_KEYS = {
 
 export type CacheKey = (typeof CONFIG_KEYS)[keyof typeof CONFIG_KEYS]
 
-/** 默认缓存有效期：5 分钟 */
-const DEFAULT_TTL = 5 * 60 * 1000
+/** 软过期：只有调用方显式 revalidate=true 时才在超过该时长后后台刷新。默认 30 分钟 */
+const DEFAULT_TTL = 30 * 60 * 1000
+
+/** 硬过期：超过该时长缓存视为不存在，下一次调用会真正请求（兜底防陈旧）。默认 2 小时 */
+const DEFAULT_MAX_AGE = 2 * 60 * 60 * 1000
 
 const STORAGE_PREFIX = 'cfg:'
 
@@ -34,12 +42,16 @@ type CacheEntry<T> = {
 }
 
 type CacheOptions = {
-  /** 有效期（毫秒），默认 5 分钟 */
+  /** 软过期（毫秒），仅在 revalidate=true 时生效，默认 30 分钟 */
   ttl?: number
+  /** 硬过期（毫秒），超过则缓存作废重新请求，默认 2 小时 */
+  maxAge?: number
   /** 存储介质：local = localStorage，session = sessionStorage，默认 local */
   storage?: 'local' | 'session'
   /** 忽略缓存强制请求（写完新数据后刷新用） */
   force?: boolean
+  /** 软过期后是否后台静默刷新，默认 false（有缓存就直接用，不发请求） */
+  revalidate?: boolean
 }
 
 /** 进程内并发去重表：同一 key 同一时刻只允许一个真实请求在飞 */
@@ -141,10 +153,11 @@ function dedupe<T>(key: string, task: () => Promise<T>): Promise<T> {
 }
 
 /**
- * 带缓存的请求封装。
+ * 带缓存的请求封装（默认 cache-first）。
  *
- * - 有未过期缓存：直接返回缓存，不发请求。
- * - 有过期缓存：立即返回旧值（保证页面秒开），同时后台静默刷新。
+ * - 有缓存且未硬过期：直接返回缓存，【完全不发请求】。
+ * - 有缓存但已硬过期：当作无缓存，真正请求一次并写回。
+ * - revalidate=true 且已软过期：返回旧值的同时后台静默刷新（默认关闭）。
  * - 无缓存：真正等待请求结果。
  * - force=true：跳过读缓存，强制请求并写回（用于写操作后的刷新）。
  */
@@ -153,7 +166,13 @@ export async function cachedRequest<T>(
   fetcher: () => Promise<T>,
   options: CacheOptions = {},
 ): Promise<T> {
-  const { ttl = DEFAULT_TTL, storage = 'local', force = false } = options
+  const {
+    ttl = DEFAULT_TTL,
+    maxAge = DEFAULT_MAX_AGE,
+    storage = 'local',
+    force = false,
+    revalidate = false,
+  } = options
 
   const fetchAndCache = () =>
     dedupe(key, async () => {
@@ -166,9 +185,11 @@ export async function cachedRequest<T>(
 
   const cached = readCache<T>(key, storage)
   if (cached) {
-    const isFresh = Date.now() - cached.ts < ttl
-    if (!isFresh) {
-      // 过期了：后台悄悄刷新，本次仍用旧值，避免页面卡顿
+    const age = Date.now() - cached.ts
+    // 硬过期：缓存作废，重新请求（兜底，避免数据永久陈旧）
+    if (age >= maxAge) return fetchAndCache()
+    // 软过期且调用方明确要求：后台刷新，本次仍用旧值
+    if (revalidate && age >= ttl) {
       fetchAndCache().catch(() => {
         // 后台刷新失败静默处理，页面继续用旧缓存
       })
@@ -177,6 +198,30 @@ export async function cachedRequest<T>(
   }
 
   return fetchAndCache()
+}
+
+/**
+ * 同步读取缓存，不发起任何请求。
+ * 用于首屏立即渲染（避免 useEffect 异步回来前的空白）。
+ */
+export function getCachedConfig<T>(
+  key: CacheKey | string,
+  storage: 'local' | 'session' = 'local',
+): T | null {
+  const entry = readCache<T>(key, storage)
+  return entry ? entry.data : null
+}
+
+/**
+ * 把已知数据直接写入缓存（不请求）。
+ * 用于登录接口已返回用户信息时，省掉紧接着的那次 /user/me。
+ */
+export function primeConfig<T>(
+  key: CacheKey | string,
+  data: T,
+  storage: 'local' | 'session' = 'local',
+) {
+  writeCache(key, data, storage)
 }
 
 /** 让某个配置缓存失效（数据被修改后调用） */

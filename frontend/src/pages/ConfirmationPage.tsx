@@ -62,11 +62,11 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
   for (const d of details) {
     const confs = d.confirmations || {}
     // 建 (date -> record) 索引，便于按日期查班次与打卡时间
-    const missingByDate = new Map<string, { shift_start: string; shift_end: string; clock_times: string[] }>()
+    const missingByDate = new Map<string, { position?: string; shift_start: string; shift_end: string; clock_times: string[] }>()
     for (const r of d.missing_clock_records || []) {
       missingByDate.set(r.date, r)
     }
-    const absenceByDate = new Map<string, { shift_start: string; shift_end: string; clock_times: string[] }>()
+    const absenceByDate = new Map<string, { position?: string; shift_start: string; shift_end: string; clock_times: string[] }>()
     for (const r of d.absence_records || []) {
       absenceByDate.set(r.date, r)
     }

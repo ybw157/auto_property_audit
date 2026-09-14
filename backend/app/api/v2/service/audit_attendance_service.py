@@ -120,16 +120,17 @@ def get_absence_coefficient(s04_rules: dict | None) -> float:
     return coef if coef > 0 else 1.0
 
 
-def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tuple[str, str], dict], dict[tuple[str, str], dict]]:
-    """构建 (姓名, 日期) → 排班信息 索引，以及 (岗位, 日期) → 缺岗信息 索引。
+def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tuple[str, str], list[dict]], dict[tuple[str, str], dict]]:
+    """构建 (姓名, 日期) → [排班信息列表] 索引，以及 (岗位, 日期) → 缺岗信息 索引。
 
     关键逻辑：
     - 班次时间按周几分段解析（parse_shift_by_weekday），再根据每个日期的星期
       用 get_shift_for_date 选取当天对应班次。
     - "缺岗"单元格无论班次能否解析都收入 vacancies（签到表写缺岗=确定缺勤）。
     - 人名单元格同样不因班次解析失败而跳过（人来了就纳入比对）。
+    - 同一天同一人出现在多个岗位时，所有候选班次都保留（list 追加，不覆盖）。
     """
-    index: dict[tuple[str, str], dict] = {}
+    index: dict[tuple[str, str], list[dict]] = {}
     vacancies: dict[tuple[str, str], dict] = {}
     for pi in position_infos:
         for p in pi.positions:
@@ -160,7 +161,7 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                         for name in cell.get("names", []):
                             nn = normalize_employee_name(name)
                             if nn:
-                                index[(nn, work_date)] = {
+                                entry = {
                                     "shift_start": start,
                                     "shift_end": end,
                                     "position": p.position_name,
@@ -169,6 +170,10 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                                     "is_cross_midnight": auto_cross,
                                     "mid_clock_windows": mid_clock_windows,
                                 }
+                                key = (nn, work_date)
+                                if key not in index:
+                                    index[key] = []
+                                index[key].append(entry)
     return index, vacancies
 
 
@@ -369,7 +374,33 @@ def run_attendance_s04_audit(
 
     employee_data: dict[str, dict] = {}
 
-    for (name, work_date), sched in schedule_index.items():
+    for (name, work_date), sched_list in schedule_index.items():
+        # 串岗检测：同一天同一人在多个岗位排班 → 警告，不扣款
+        if len(sched_list) > 1:
+            entry = employee_data.setdefault(name, {
+                "employee_name": name,
+                "position": sched_list[0]["position"],
+                "missing_clock_dates": set(),
+                "missing_clock_records": [],
+                "missing_clock_count_extra": 0,
+                "late_details": [],
+                "early_leave_details": [],
+                "absence_dates": set(),
+                "absence_records": [],
+                "mid_clock_issues": [],
+                "daily_rate": round(sched_list[0]["hourly_rate"] * sched_list[0]["daily_hours"], 2),
+                "cross_assignment_warnings": [],
+            })
+            positions = [s["position"] for s in sched_list]
+            entry["cross_assignment_warnings"].append({
+                "date": work_date,
+                "positions": positions,
+                "message": f"{name} 在 {work_date} 同时出现在多个岗位排班: {'、'.join(positions)}，当天不执行考勤扣款",
+            })
+            print(f"  [串岗警告] {name} {work_date}: {'、'.join(positions)}")
+            continue
+
+        sched = sched_list[0]
         clocks = list(bi_index.get((name, work_date), []))
         is_cross = sched.get("is_cross_midnight", False)
 
@@ -423,12 +454,14 @@ def run_attendance_s04_audit(
             "absence_records": [],
             "mid_clock_issues": [],
             "daily_rate": round(sched["hourly_rate"] * sched["daily_hours"], 2),
+            "cross_assignment_warnings": [],
         })
 
         if not all_clocks:
-            # 签到表写了人名 = 人来了，但没有打卡记录 → 漏打卡
-            entry["missing_clock_dates"].add(work_date)
-            entry["missing_clock_records"].append({
+            # 排班表写了人名，但 BI 考勤当天（含跨天班次）完全无打卡记录
+            # → 判定为缺勤（视为当天未到岗）
+            entry["absence_dates"].add(work_date)
+            entry["absence_records"].append({
                 "date": work_date,
                 "position": sched["position"],
                 "shift_start": sched["shift_start"],
@@ -540,6 +573,7 @@ def run_attendance_s04_audit(
             "absence_records": [],
             "mid_clock_issues": [],
             "daily_rate": round(vac["hourly_rate"] * vac["daily_hours"], 2) if vac["hourly_rate"] and vac["daily_hours"] else 0,
+            "cross_assignment_warnings": [],
         })
         entry["absence_dates"].add(work_date)
         entry["absence_records"].append({
@@ -594,12 +628,14 @@ def run_attendance_s04_audit(
             "absence_multiplier": absence_multiplier,
             "absence_amount": round(absence_amount, 2),
             "total_deduction": round(total, 2),
+            "cross_assignment_warnings": data.get("cross_assignment_warnings", []),
         })
 
     total_missing = sum(d["missing_clock_amount"] for d in deduction_details)
     total_late = sum(d["late_total"] for d in deduction_details)
     total_early = sum(d["early_leave_total"] for d in deduction_details)
     total_absence = sum(d["absence_amount"] for d in deduction_details)
+    total_cross_warnings = sum(len(d.get("cross_assignment_warnings", [])) for d in deduction_details)
 
     return {
         "deduction_details": deduction_details,
@@ -610,6 +646,7 @@ def run_attendance_s04_audit(
             "total_absence_amount": round(total_absence, 2),
             "total_deduction": round(total_missing + total_late + total_early + total_absence, 2),
             "affected_employees": len(deduction_details),
+            "cross_assignment_warning_count": total_cross_warnings,
         },
         "s04_rules": {
             "free_missing_clock_times": missing_free,

@@ -110,6 +110,22 @@ class ContractUpdateRequest(BaseModel):
     rules: Optional[dict] = None
 
 
+class ContractCreateRequest(BaseModel):
+    """凭解析草稿的 temp_file 把合同转正入库（POST /contracts）"""
+    temp_file: str
+    original_name: str
+    project_name: Optional[str] = None
+    business_type: Optional[str] = None
+    supplier: Optional[str] = None
+    contract_no: Optional[str] = None
+    contract_name: Optional[str] = None
+    service_type: Optional[str] = None
+    version: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    rules: Optional[dict] = None
+
+
 # ========== 审核结果更新 ==========
 class AuditResultUpdateRequest(BaseModel):
     """审核员修改审核结果"""

@@ -30,6 +30,7 @@ def normalize_employee_name(value: Any) -> str:
         "劉": "刘", "張": "张", "陳": "陈", "趙": "赵", "黃": "黄",
         "峰": "丰", "颖": "影",
     }))
+    text = re.sub(r"[（(].*?[)）]", "", text)
     return text.strip()
 
 
@@ -427,11 +428,15 @@ def split_employee_cell(value: Any) -> list[str]:
         return []
     for sep in ["\n", "、", "，", ",", ";", "；"]:
         text = text.replace(sep, " ")
-    return [
-        part.strip()
-        for part in text.split()
-        if part.strip() and part.strip() not in {"休息", "休", "0"}
-    ]
+    names: list[str] = []
+    for part in text.split():
+        part = part.strip()
+        if not part or part in {"休息", "休", "0"}:
+            continue
+        part = re.sub(r"[（(].*?[)）]", "", part).strip()
+        if part:
+            names.append(part)
+    return names
 
 
 def classify_schedule_cell(raw: Any) -> dict:

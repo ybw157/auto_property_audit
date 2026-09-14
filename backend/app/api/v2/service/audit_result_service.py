@@ -16,16 +16,18 @@ from app.api.v2.service.audit_attendance_service import (
 from app.api.v2.utils.audit_common import normalize_employee_name, parse_shift_by_weekday, get_shift_for_date, parse_time_value, time_to_minutes
 
 
-def _load_active_s04_rules(project_name: str, business_type: str):
-    """返回激活合同的 S04 规则（与审核主流程一致：最后一个激活且有规则的合同胜出）。
+def _load_active_s04_rules(project_name: str, business_type: str, service_type: str = ""):
+    """返回启用合同的 S04 规则（同项目同业态同服务类型多份合同时，取"最近更新"的那份）。
 
     用于：槽位缺编扣款系数、S04 考勤管理规则读取。
+    系数来源统一为合同细则卡片里填的 contract_deduction_coefficient。
     """
-    rules = None
-    for c in contract_dao.get_contracts(project_name, business_type):
-        if c.is_active and c.rules:
-            rules = extract_s04_rules(c.rules)
-    return rules
+    contract = contract_dao.get_latest_active_contract(
+        project_name, business_type, service_type=service_type, require_rules=True
+    )
+    if contract is None:
+        return None
+    return extract_s04_rules(contract.rules)
 
 
 def _next_month(audit_month: str) -> str:
@@ -145,13 +147,127 @@ def _merge_next_month_bi(
     return merged
 
 
+def _bi_day_to_iso_local(label, audit_month: str) -> str:
+    """把 BI 的 '1日' / '1' / '2026-09-01' 转成 ISO 日期（用于跨项目兜底检索）。"""
+    text = str(label or "").strip()
+    m_iso = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if m_iso:
+        return f"{int(m_iso.group(1)):04d}-{int(m_iso.group(2)):02d}-{int(m_iso.group(3)):02d}"
+    digits = re.sub(r"\D", "", text)
+    if not digits:
+        return ""
+    day = int(digits[-2:]) if len(digits) >= 2 else int(digits)
+    m = re.match(r"(\d{4})[-年.]?(\d{1,2})", str(audit_month or ""))
+    if not m:
+        return ""
+    prefix = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
+    return f"{prefix}-{day:02d}"
+
+
+def _collect_schedule_name_days(position_infos) -> dict:
+    """从岗位排班中收集 (归一化姓名 -> 排班日期集合)，用于跨项目代班兜底检索。"""
+    name_days: dict = {}
+    for pi in position_infos:
+        for p in pi.positions:
+            for slot in p.slots:
+                for work_date, cells in slot.daily.items():
+                    for cell in cells:
+                        for name in cell.get("names", []):
+                            nn = normalize_employee_name(name)
+                            if nn:
+                                name_days.setdefault(nn, set()).add(work_date)
+    return name_days
+
+
+def _enrich_bi_cross_project(position_infos, bi_records, audit_month):
+    """跨项目代班兜底检索（优化 BI 查询逻辑）。
+
+    规则：
+      1) 排班中出现的人员，若已在本项目 BI 子集里 → 维持原逻辑（直接用本项目数据）。
+      2) 若本项目 BI 查无此人 → 以『姓名』为条件到当月全量 BI 中检索：
+         - 仅匹配 1 人 → 直接采用该人员 BI 数据（并入 bi_records 并标记来源项目）。
+         - 匹配多人   → 不直接采用，生成人工复核条目（列出每人姓名/原属项目/当日打卡时间），
+                        交由审核员确认代班归属；该人员当天考勤仍按"未匹配"处理。
+    返回 (enriched_bi_records, resolved_list, review_list)。
+    """
+    # 本项目已有姓名集合（原逻辑：本项目子集优先）
+    current_names = {
+        normalize_employee_name(r.get("employee_name", ""))
+        for r in bi_records
+    }
+    current_names.discard("")
+
+    schedule_name_days = _collect_schedule_name_days(position_infos)
+
+    # 当月全量 BI（仅一次查询），按归一化姓名建索引
+    all_month = bi_dao.get_bi_by_month(audit_month)
+    month_index: dict = {}
+    for r in all_month:
+        nn = normalize_employee_name(r.get("employee_name", ""))
+        if nn:
+            month_index.setdefault(nn, []).append(r)
+
+    enriched = list(bi_records)
+    resolved_list: list = []   # 已自动归并的跨项目代班（可追溯）
+    review_list: list = []      # 需人工复核的代班人员
+
+    for sname, sch_days in schedule_name_days.items():
+        if sname in current_names:
+            continue  # 原逻辑：本项目已有该人，不跨项目检索
+        cands = month_index.get(sname, [])
+        if not cands:
+            continue  # 全量 BI 也无此人 → 维持原判定（大概率真缺勤）
+        if len(cands) == 1:
+            # 情形一：当月全量 BI 中仅此一人同名 → 直接采用
+            rec = dict(cands[0])
+            rec["resolved_cross_project"] = True
+            rec["source_project_name"] = rec.get("project_name", "")
+            enriched.append(rec)
+            resolved_list.append({
+                "schedule_name": sname,
+                "employee_id": rec.get("employee_id", ""),
+                "source_project_name": rec.get("project_name", ""),
+                "scheduled_dates": sorted(sch_days),
+            })
+        else:
+            # 情形二：当月全量 BI 中多人同名 → 列出候选，交人工复核
+            candidates = []
+            for c in cands:
+                att = c.get("attendance", {}) or {}
+                by_date: dict = {}
+                for label, clocks in att.items():
+                    iso = _bi_day_to_iso_local(label, audit_month)
+                    if iso and iso in sch_days:
+                        cl = [str(x).strip() for x in (clocks or []) if x and str(x).strip()]
+                        if cl:
+                            by_date[iso] = cl
+                candidates.append({
+                    "employee_name": c.get("employee_name", ""),
+                    "employee_id": c.get("employee_id", ""),
+                    "project_name": c.get("project_name", ""),
+                    "clock_by_date": by_date,
+                })
+            review_list.append({
+                "schedule_name": sname,
+                "scheduled_dates": sorted(sch_days),
+                "candidates": candidates,
+                "message": (
+                    f"代班人员『{sname}』在当月全量 BI 中匹配到 {len(cands)} 名同名人员"
+                    f"（可能跨项目），需人工确认归属"
+                ),
+            })
+
+    return enriched, resolved_list, review_list
+
+
 def get_audit_result(
     project_name: str,
     business_type: str,
     audit_month: str,
+    service_type: str = "",
 ) -> dict:
     """获取审核结果。"""
-    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month)
+    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
         raise HTTPException(status_code=404, detail="未找到审核结果")
     return result.to_dict()
@@ -170,6 +286,7 @@ def start_audit(
     project_name: str,
     business_type: str,
     audit_month: str,
+    service_type: str = "",
 ) -> dict:
     """开始审核：加载岗位(含排班槽位) + 同项目 BI 考勤，跑槽位级三源审核并落库。
 
@@ -177,10 +294,10 @@ def start_audit(
     """
 
     print(f"\n{'='*60}")
-    print(f"[审核开始] project_name={project_name}, business_type={business_type}, audit_month={audit_month}")
+    print(f"[审核开始] project_name={project_name}, business_type={business_type}, service_type={service_type}, audit_month={audit_month}")
     print(f"{'='*60}")
 
-    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month)
+    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if result and result.locked:
         raise HTTPException(status_code=400, detail="该审核已锁定，不能重新审核")
 
@@ -226,12 +343,28 @@ def start_audit(
             else:
                 print(f"  - 下月({next_month}) 无 BI 数据，跳过合并")
 
+    # 2.6) 跨项目代班兜底：排班中出现的人员若不在本项目 BI 子集，按姓名到当月全量 BI 检索
+    #      - 仅匹配 1 人 → 直接并入 bi_records（标记来源项目）
+    #      - 匹配多人   → 生成人工复核条目，不自动采用
+    bi_records, cross_sub_resolved, cross_sub_review = _enrich_bi_cross_project(
+        [position_info], bi_records, audit_month
+    )
+    if cross_sub_resolved:
+        print(f"  - 跨项目代班自动归并 {len(cross_sub_resolved)} 人: "
+              + ", ".join(r["schedule_name"] + f"(←{r['source_project_name']})" for r in cross_sub_resolved))
+    if cross_sub_review:
+        print(f"  - 跨项目代班需人工复核 {len(cross_sub_review)} 人: "
+              + ", ".join(r["schedule_name"] for r in cross_sub_review))
+
     # 3) 跑槽位级三源审核（排班表 × BI 打卡）
     # 岗位缺编扣款 = 缺岗天数 × 日服务费 × 合同缺编系数，
     # 故先在激活合同里取系数再传入槽位审核
     print(f"\n[步骤3] 执行槽位级三源审核...")
-    absence_coefficient = get_absence_coefficient(_load_active_s04_rules(project_name, business_type))
+    absence_coefficient = get_absence_coefficient(_load_active_s04_rules(project_name, business_type, service_type))
     audit_out = run_slot_audit([position_info], bi_records, audit_month, absence_coefficient)
+    # 跨项目代班兜底结果随审核输出落库，供前端展示与人工复核
+    audit_out["cross_project_substitute_resolved"] = cross_sub_resolved
+    audit_out["cross_project_substitute_review"] = cross_sub_review
     slot_details = audit_out.get("slot_details", [])
     summary = audit_out.get("summary", [])
     print(f"  - 槽位审核记录数: {len(slot_details)}")
@@ -243,7 +376,7 @@ def start_audit(
     print(f"\n[步骤4] 加载合同 S04 规则...")
     contracts = contract_dao.get_contracts(project_name, business_type)
     print(f"  - 找到合同数: {len(contracts)}")
-    s04_rules = _load_active_s04_rules(project_name, business_type)
+    s04_rules = _load_active_s04_rules(project_name, business_type, service_type)
     if s04_rules:
         print(f"  - S04 规则: {s04_rules}")
 
@@ -293,6 +426,7 @@ def start_audit(
     out = AuditResult(
         project_name=project_name,
         business_type=business_type,
+        service_type=service_type,
         audit_month=audit_month,
         status="已审核",
         version=new_version,

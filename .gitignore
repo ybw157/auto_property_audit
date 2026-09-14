@@ -6,6 +6,7 @@ __pycache__/
 # 虚拟环境
 .venv/
 venv/
+.pylibs/
 
 # 后端运行时数据（上传文件、报告、数据库、合同、BI数据）
 backend/storage/

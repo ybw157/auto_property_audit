@@ -1,4 +1,5 @@
 """Word 文档解析器 —— 从 .doc / .docx 中提取文本并解析结构化字段。"""
+import copy
 import logging
 import os
 import re
@@ -326,14 +327,85 @@ _DEFAULT_RULES = [
 
 def _parse_deduction_rules(text: str) -> list:
     attachment_text = _extract_attachment3(text)
-    if not attachment_text:
-        return _DEFAULT_RULES
-
-    rules = _parse_rules_from_table(attachment_text)
+    rules: list = []
+    if attachment_text:
+        rules = _parse_rules_from_table(attachment_text)
     if not rules or len(rules) < 5:
-        return _DEFAULT_RULES
+        # 深拷贝，避免把系数写回模块级常量污染后续解析
+        rules = copy.deepcopy(_DEFAULT_RULES)
 
+    # 缺岗/缺勤扣款系数：与 PDF 解析保持同口径，写入 S04 规则供审核计算读取
+    coefficient = _extract_shortage_coefficient(text)
+    if coefficient is not None:
+        _apply_shortage_coefficient(rules, coefficient)
     return rules
+
+
+def _normalize_formula_text(text: str) -> str:
+    """归一化公式片段：去空白、统一乘号与括号，便于正则匹配。"""
+    value = str(text or "")
+    value = re.sub(r"\s+", "", value)
+    value = (
+        value.replace("×", "*")
+        .replace("＊", "*")
+        .replace("·", "*")
+        .replace("•", "*")
+        .replace("（", "(")
+        .replace("）", ")")
+    )
+    return value
+
+
+def _extract_shortage_coefficient(text: str) -> float | None:
+    """从 Word 合同正文提取缺勤/缺岗扣款系数（与 pdf_parser 同款口径）。
+
+    匹配形如「工时单价*1.2*缺勤总时长」「当日服务费*2.5」的表述。
+    提取不到返回 None（由前端细则卡片补全，不在代码里兜底成固定值）。
+    """
+    normalized = _normalize_formula_text(text)
+    if not normalized:
+        return None
+    patterns = [
+        r"工时单价\*(?P<v>\d+(?:\.\d+)?)\*缺勤总时长",
+        r"工时单价\*(?P<v>\d+(?:\.\d+)?)\*缺岗总时长",
+        r"缺勤总时长\*(?P<v>\d+(?:\.\d+)?)\*工时单价",
+        r"当日服务费\*(?P<v>\d+(?:\.\d+)?)",
+        r"缺岗[^。；;\n]{0,10}?\*(?P<v>\d+(?:\.\d+)?)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, normalized)
+        if not m:
+            continue
+        try:
+            value = float(m.group("v"))
+        except (TypeError, ValueError):
+            continue
+        if 0 < value <= 10:
+            return value
+    return None
+
+
+def _apply_shortage_coefficient(rules: list, coefficient: float) -> None:
+    """把系数挂到 S04 规则上，并同步 S04-4 的展示文案，避免展示与计算两张皮。"""
+    s04 = next(
+        (r for r in rules if isinstance(r, dict) and r.get("code") == "S04"),
+        None,
+    )
+    if s04 is None:
+        s04 = {
+            "code": "S04",
+            "name": "考勤管理",
+            "penalty_type": "composite",
+            "condition": "漏打卡、迟到、早退、缺岗等",
+            "sub_rules": [],
+            "enabled": True,
+        }
+        rules.append(s04)
+
+    s04["contract_deduction_coefficient"] = coefficient
+    for sub in s04.get("sub_rules") or []:
+        if isinstance(sub, dict) and sub.get("code") == "S04-4":
+            sub["amount"] = f"当日服务费*{coefficient}"
 
 
 def _extract_attachment3(text: str) -> str:

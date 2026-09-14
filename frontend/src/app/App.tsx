@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import { useEffect } from 'react'
 import { useAuth } from '../hooks/useAuth'
+import { preloadConfigs } from '../services/configCache'
 import { Layout } from '../components/Layout'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { Login } from '../pages/Login'
@@ -24,6 +25,12 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
       navigate('/login', { replace: true })
     }
   }, [user, loading, navigate])
+
+  // 应用挂载（登录态就绪）后统一预拉取一次配置，之后各页面直接命中缓存
+  // AuthGuard 不随路由切换卸载，因此整个会话只执行一次
+  useEffect(() => {
+    if (user) preloadConfigs()
+  }, [user])
 
   if (loading) {
     return (

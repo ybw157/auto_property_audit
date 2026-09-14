@@ -28,6 +28,7 @@ def save_audit_result(result: AuditResult) -> int:
             existing.locked = result.locked
             existing.confirmed_by = result.confirmed_by
             existing.confirmed_at = result.confirmed_at
+            existing.service_type = result.service_type
             existing.updated_at = now_text()
             db.commit()
             return existing.id
@@ -44,18 +45,21 @@ def get_audit_result(
     project_name: str,
     business_type: str,
     audit_month: str,
+    service_type: str = "",
 ) -> AuditResult | None:
     db: Session = next(get_db())
     try:
-        return (
+        q = (
             db.query(AuditResult)
             .filter(
                 AuditResult.project_name == project_name,
                 AuditResult.business_type == business_type,
                 AuditResult.audit_month == audit_month,
             )
-            .first()
         )
+        if service_type:
+            q = q.filter(AuditResult.service_type == service_type)
+        return q.first()
     finally:
         db.close()
 
