@@ -64,6 +64,29 @@ def get_position_info(
         db.close()
 
 
+def list_uploaded_business_types(project_name: str, audit_month: str) -> list[str]:
+    """查询某项目某月份**已上传**岗位数据的业态列表。
+
+    用途：当 get_position_info(project_name, business_type, audit_month) 返回空时，
+    借此区分两种失败原因——
+      - 返回空列表 → 该项目当月确实还没上传岗位数据；
+      - 返回非空   → 数据已上传，只是传入的 business_type 与已上传业态不匹配。
+    """
+    db: Session = next(get_db())
+    try:
+        rows = (
+            db.query(PositionInfo.business_type)
+            .filter(
+                PositionInfo.project_name == project_name,
+                PositionInfo.audit_month == audit_month,
+            )
+            .all()
+        )
+        return sorted({str(r[0]).strip() for r in rows if r[0]})
+    finally:
+        db.close()
+
+
 def get_all_position_info() -> list[PositionInfo]:
     db: Session = next(get_db())
     try:

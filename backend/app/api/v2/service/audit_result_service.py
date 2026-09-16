@@ -276,9 +276,10 @@ def get_audit_result(
 def list_audit_results(
     project_name: str = "",
     audit_month: str = "",
+    business_type: str = "",
 ) -> list[dict]:
     """获取审核结果列表。"""
-    results = audit_result_dao.list_audit_results(project_name, audit_month)
+    results = audit_result_dao.list_audit_results(project_name, audit_month, business_type)
     return [r.to_dict() for r in results]
 
 
@@ -305,6 +306,33 @@ def start_audit(
     print(f"\n[步骤1] 加载岗位信息...")
     position_info = position_dao.get_position_info(project_name, business_type, audit_month)
     if position_info is None or not position_info.positions:
+        # 区分三种失败原因，避免"数据已上传、只是业态选错"时误导用户反复重新上传
+        if position_info is not None:
+            # 记录存在但岗位列表为空 → Excel 解析出的岗位数为 0
+            print(f"  - [岗位缺失] 业态 {business_type!r} 有记录但岗位列表为空（解析结果为空）")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"业态「{business_type}」的岗位数据存在，但岗位列表为空，"
+                    "通常是 Excel 的「合同编制表」未被正确解析。"
+                    "请重新上传岗位/排班 Excel，并核对岗位名称列、业态列是否填写规范。"
+                ),
+            )
+        uploaded_types = position_dao.list_uploaded_business_types(project_name, audit_month)
+        if uploaded_types:
+            print(
+                f"  - [岗位缺失] business_type={business_type!r} 无匹配；"
+                f"该项目 {audit_month} 已上传的业态为: {uploaded_types}"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"业务类型不匹配：未找到业态「{business_type}」的岗位数据。"
+                    f"该项目 {audit_month} 已上传岗位数据的业态为：{'、'.join(uploaded_types)}，"
+                    "请在项目选择处切换到对应业态后再审核（无需重新上传 Excel）。"
+                ),
+            )
+        print(f"  - [岗位缺失] 该项目 {audit_month} 尚未上传任何岗位数据")
         raise HTTPException(
             status_code=400,
             detail="未找到该项目的岗位数据，请先上传岗位/排班 Excel",
@@ -481,15 +509,18 @@ def confirm_audit(
     business_type: str,
     audit_month: str,
     confirmed_by: str,
+    service_type: str = "",
 ) -> dict:
-    """确认审核结果。"""
-    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month)
+    """确认审核结果（只锁定指定服务类型的那一条）。"""
+    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
         raise HTTPException(status_code=404, detail="未找到审核结果")
     if result.locked:
         raise HTTPException(status_code=400, detail="已锁定，不能重复确认")
 
-    audit_result_dao.lock_audit_result(project_name, business_type, audit_month, confirmed_by)
+    audit_result_dao.lock_audit_result(
+        project_name, business_type, audit_month, confirmed_by, service_type
+    )
     return {"message": "审核结果已确认并锁定"}
 
 
@@ -500,9 +531,10 @@ def update_audit_result(
     results_json: list | None = None,
     summary_json: list | None = None,
     status: str | None = None,
+    service_type: str = "",
 ) -> dict:
-    """审核员手动修改审核结果。"""
-    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month)
+    """审核员手动修改审核结果（只改指定服务类型的那一条）。"""
+    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
         raise HTTPException(status_code=404, detail="未找到审核结果")
     if result.locked:
@@ -512,11 +544,12 @@ def update_audit_result(
 
     audit_result_dao.update_audit_result_fields(
         project_name, business_type, audit_month,
+        service_type=service_type,
         results_json=json_dumps(results_json) if results_json is not None else None,
         summary_json=json_dumps(summary_json) if summary_json is not None else None,
         status=status,
     )
-    updated = audit_result_dao.get_audit_result(project_name, business_type, audit_month)
+    updated = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     return updated.to_dict()
 
 
@@ -526,6 +559,7 @@ def confirm_exceptions(
     audit_month: str,
     confirmed_records: list[dict],
     confirmed_by: str,
+    service_type: str = "",
 ) -> dict:
     """批量确认异常记录。
 
@@ -537,7 +571,7 @@ def confirm_exceptions(
     """
     from app.api.v2.core.database import json_dumps, json_loads, now_text
 
-    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month)
+    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
         raise HTTPException(status_code=404, detail="未找到审核结果")
     if result.locked:
@@ -552,7 +586,8 @@ def confirm_exceptions(
         emp = r.get("employee_name", "")
         date = r.get("work_date", "")
         etype = r.get("exception_type", "missing_clock")
-        key = f"{etype}|{emp}|{date}"
+        window = r.get("window", "")
+        key = f"{etype}|{emp}|{date}|{window}" if window else f"{etype}|{emp}|{date}"
         confirm_map[key] = {
             "confirmed": r.get("confirmed", False),
             "note": r.get("confirm_note", ""),
@@ -565,7 +600,7 @@ def confirm_exceptions(
         confirmations = detail.setdefault("confirmations", {})
 
         for date_str in detail.get("missing_clock_dates", []):
-            key = f"missing|{emp_name}|{date_str}"
+            key = f"missing_clock|{emp_name}|{date_str}"
             if key in confirm_map:
                 confirmations[key] = {
                     "confirmed": confirm_map[key]["confirmed"],
@@ -579,7 +614,7 @@ def confirm_exceptions(
         for issue in detail.get("mid_clock_issues", []):
             date_str = issue.get("date", "")
             window = issue.get("window", "")
-            key = f"mid|{emp_name}|{date_str}|{window}"
+            key = f"mid_clock|{emp_name}|{date_str}|{window}" if window else f"mid_clock|{emp_name}|{date_str}"
             if key in confirm_map:
                 confirmations[key] = {
                     "confirmed": confirm_map[key]["confirmed"],
@@ -605,7 +640,7 @@ def confirm_exceptions(
 
         for early in detail.get("early_leave_details", []):
             date_str = early.get("date", "")
-            key = f"early|{emp_name}|{date_str}"
+            key = f"early_leave|{emp_name}|{date_str}"
             if key in confirm_map:
                 confirmations[key] = {
                     "confirmed": confirm_map[key]["confirmed"],
@@ -631,6 +666,7 @@ def confirm_exceptions(
     data["s04_attendance_audit"] = s04_audit
     audit_result_dao.update_audit_result_fields(
         project_name, business_type, audit_month,
+        service_type=service_type,
         results_json=json_dumps(data),
     )
 
@@ -642,11 +678,12 @@ def finalize_audit(
     business_type: str,
     audit_month: str,
     confirmed_by: str,
+    service_type: str = "",
 ) -> dict:
-    """确认最终版：根据确认记录计算最终扣款，锁定审核结果。"""
+    """确认最终版：根据确认记录计算最终扣款，锁定审核结果（只锁定指定服务类型那一条）。"""
     from app.api.v2.core.database import json_dumps, json_loads, now_text
 
-    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month)
+    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
         raise HTTPException(status_code=404, detail="未找到审核结果")
     if result.locked:
@@ -669,7 +706,7 @@ def finalize_audit(
         unconfirmed_missing_count = 0
         free_missing_count = 0
         for date_str in missing_dates:
-            key = f"missing|{emp_name}|{date_str}"
+            key = f"missing_clock|{emp_name}|{date_str}"
             conf = confirmations.get(key, {})
             if conf.get("free_deduction", False):
                 free_missing_count += 1
@@ -697,7 +734,7 @@ def finalize_audit(
         confirmed_early_total = 0
         for early in detail.get("early_leave_details", []):
             date_str = early.get("date", "")
-            key = f"early|{emp_name}|{date_str}"
+            key = f"early_leave|{emp_name}|{date_str}"
             conf = confirmations.get(key, {})
             if conf.get("confirmed", False) and not conf.get("free_deduction", False):
                 confirmed_early_total += early.get("amount", 0) or 0
@@ -706,7 +743,7 @@ def finalize_audit(
         for issue in detail.get("mid_clock_issues", []):
             date_str = issue.get("date", "")
             window = issue.get("window", "")
-            key = f"mid|{emp_name}|{date_str}|{window}"
+            key = f"mid_clock|{emp_name}|{date_str}|{window}" if window else f"mid_clock|{emp_name}|{date_str}"
             conf = confirmations.get(key, {})
             if conf.get("confirmed", False) and not conf.get("free_deduction", False):
                 confirmed_mid_total += (issue.get("missing", 0) or 0) * 50
@@ -765,13 +802,17 @@ def finalize_audit(
         confirmations = detail.get("confirmations", {})
         keys: list[str] = []
         for date_str in detail.get("missing_clock_dates", []):
-            keys.append(f"missing|{emp_name}|{date_str}")
+            keys.append(f"missing_clock|{emp_name}|{date_str}")
         for issue in detail.get("mid_clock_issues", []):
-            keys.append(f"mid|{emp_name}|{issue.get('date', '')}|{issue.get('window', '')}")
+            _w = issue.get("window", "")
+            keys.append(
+                f"mid_clock|{emp_name}|{issue.get('date', '')}|{_w}"
+                if _w else f"mid_clock|{emp_name}|{issue.get('date', '')}"
+            )
         for late in detail.get("late_details", []):
             keys.append(f"late|{emp_name}|{late.get('date', '')}")
         for early in detail.get("early_leave_details", []):
-            keys.append(f"early|{emp_name}|{early.get('date', '')}")
+            keys.append(f"early_leave|{emp_name}|{early.get('date', '')}")
         for date_str in detail.get("absence_dates", []):
             keys.append(f"absence|{emp_name}|{date_str}")
         exception_count += len(keys)
@@ -785,10 +826,13 @@ def finalize_audit(
 
     audit_result_dao.update_audit_result_fields(
         project_name, business_type, audit_month,
+        service_type=service_type,
         results_json=json_dumps(data),
         status="已确认",
     )
-    audit_result_dao.lock_audit_result(project_name, business_type, audit_month, confirmed_by)
+    audit_result_dao.lock_audit_result(
+        project_name, business_type, audit_month, confirmed_by, service_type
+    )
 
     return {
         "message": "审核结果已确认并锁定",

@@ -7,7 +7,14 @@ from .base import Base
 
 class AuditResult(Base):
     __tablename__ = "audit_results"
-    __table_args__ = (UniqueConstraint("project_name", "business_type", "audit_month"),)
+    # 同一项目同一业态同一月份下，保安/保洁各自独立存一份审核结果，
+    # 因此唯一键必须包含 service_type，否则后审核的服务类型会覆盖先审核的。
+    __table_args__ = (
+        UniqueConstraint(
+            "project_name", "business_type", "audit_month", "service_type",
+            name="uq_audit_result_scope",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     project_name: Mapped[str] = mapped_column(String(255), nullable=False)

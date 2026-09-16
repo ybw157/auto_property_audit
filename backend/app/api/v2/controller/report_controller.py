@@ -36,12 +36,13 @@ def generate_report(
     business_type: str,
     audit_month: str,
     report_type: str,
+    service_type: str = "",
 ):
     project_name = resolve_project_name(request, project_name)
     if report_type not in ("attendance", "summary"):
         raise HTTPException(status_code=400, detail="无效的报告类型")
 
-    audit_result = audit_result_dao.get_audit_result(project_name, business_type, audit_month)
+    audit_result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not audit_result:
         raise HTTPException(status_code=404, detail="未找到审核结果")
 

@@ -79,6 +79,7 @@ class BatchConfirmRequest(BaseModel):
     project_name: str
     business_type: str
     audit_month: str
+    service_type: str = ""
     confirmed_records: list[ConfirmRecordRequest]
     confirmed_by: str = ""
 
@@ -132,6 +133,7 @@ class AuditResultUpdateRequest(BaseModel):
     project_name: str
     business_type: str
     audit_month: str
+    service_type: str = ""
     results_json: Optional[list] = None
     summary_json: Optional[list] = None
     status: Optional[str] = None

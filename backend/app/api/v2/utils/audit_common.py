@@ -140,6 +140,32 @@ def is_cross_midnight_shift(shift: Shift) -> bool:
     return end_min <= start_min
 
 
+def resolve_cross_midnight(field_raw: str, start: str, end: str) -> bool:
+    """跨夜班次判定：编制表字段优先，时间数值关系兜底。
+
+    判定顺序：
+    1. 编制表 cross_midnight 列明确标「是」→ 跨夜 True；
+    2. 明确标「否」→ 跨夜 False（字段已明确判定，不再回退时间）；
+    3. 其它（空白 / 未标注 / 其它值）→ 兜底按班次时间数值关系：
+       开始时间数值 > 结束时间数值（大数在前、小数在后，统一 24 小时制）→ 跨夜。
+       例如 19:00-07:00（1140 > 420）、22:00-06:00（1320 > 360）判为跨夜；
+       07:00-19:00（420 < 1140）不跨夜。
+    """
+    raw = (field_raw or "").strip()
+    if raw == "是":
+        return True
+    if raw == "否":
+        return False
+    # 兜底：无法通过字段明确判定时，用时间数值关系
+    s = parse_time_value(start)
+    e = parse_time_value(end)
+    sm = time_to_minutes(s) if s else None
+    em = time_to_minutes(e) if e else None
+    if sm is None or em is None:
+        return False
+    return sm > em
+
+
 def shift_clock_minutes(clock_times: list[str], shift: Shift) -> list[int]:
     """将打卡时间转为分钟数，处理跨天班次（次日凌晨打卡 +1440）。"""
     start = parse_time_value(shift.start_time or "08:00")
@@ -173,16 +199,25 @@ def shift_clock_minutes(clock_times: list[str], shift: Shift) -> list[int]:
 def split_cross_day_clocks(
     clock_times: list[str],
     prev_shift: Shift | None,
+    is_cross: bool | None = None,
 ) -> tuple[list[str], list[str]]:
     """把某天的打卡拆成「属于当天」与「属于前一天跨天班次的下班卡」两组。
 
     夜班 22:00 上班、次日 06:00 下班时，06:00 这张卡会记在第二天头上，
     但它证明的是「前一天有人上班」，不能拿来当作「第二天这个岗位有人」。
     不做这一步，凌晨的下班卡会让大量实际没人的岗位被误判为有人到岗。
+
+    is_cross：跨夜判定结果。优先使用调用方按「编制表字段+时间兜底」解析出的值；
+    为 None 时回退到仅按时间关系（结束<=开始）判定，保持向后兼容。
     """
     if not clock_times:
         return [], []
-    if prev_shift is None or not is_cross_midnight_shift(prev_shift):
+    cross = (
+        is_cross
+        if is_cross is not None
+        else (is_cross_midnight_shift(prev_shift) if prev_shift is not None else False)
+    )
+    if prev_shift is None or not cross:
         return list(clock_times), []
     end_min = time_to_minutes(parse_time_value(prev_shift.end_time))
     if end_min is None:
@@ -359,6 +394,41 @@ def strip_position_time_suffix(text: Any) -> str:
     stripped = re.sub(r"\s+", "", stripped)
 
     return stripped or raw
+
+
+# 岗位名中的「班次/时段标签」：（白）（晚）（夜）（早）（中）/（白班）（晚班）...
+# 注意：strip_position_time_suffix 会把括号内容整体删掉，连（白）/（晚）一起删。
+# 但白班与晚班是两个不同的编制岗位（人员、费率、排班都不同），聚合时必须保留标签，
+# 否则同名多行岗位在白/晚槽位之间轮询分配时会串岗（晚班缺岗被记到白班头上）。
+_POSITION_SHIFT_TAG_RE = re.compile(
+    r"[（(]\s*(白班|晚班|夜班|早班|中班|白|晚|夜|早|中)\s*[)）]"
+)
+
+
+def extract_position_shift_tag(text: Any) -> str:
+    """提取岗位名中的班次标签并归一化为单字（白/晚/夜/早/中）。
+
+    例："东门门岗（晚）" → "晚"；"南门车岗(白班)" → "白"；"停车场" → ""。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    match = _POSITION_SHIFT_TAG_RE.search(raw)
+    if not match:
+        return ""
+    tag = match.group(1)
+    return tag[0] if tag else ""
+
+
+def position_name_with_shift_tag(text: Any) -> str:
+    """在 strip_position_time_suffix 基础上保留班次标签，得到可精确挂接的岗位键。
+
+    例："东门门岗（晚）7:00-19:00" → "东门门岗(晚)"；"停车场" → "停车场"。
+    与 strip_position_time_suffix 结果不同时，说明该岗位带班次标签。
+    """
+    base = strip_position_time_suffix(text)
+    tag = extract_position_shift_tag(text)
+    return f"{base}({tag})" if tag else base
 
 
 def parse_mid_clock_time(mid_clock_time: str) -> list[tuple[str, str, int]]:

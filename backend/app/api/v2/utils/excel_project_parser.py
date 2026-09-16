@@ -15,6 +15,8 @@ from typing import Any
 from app.api.v2.models.position_models import PositionInfo, Position, ScheduleSlot
 from app.api.v2.utils.audit_common import (
     classify_schedule_cell,
+    extract_position_shift_tag,
+    position_name_with_shift_tag,
     strip_position_time_suffix,
 )
 
@@ -185,31 +187,55 @@ def _attach_slots_to_positions(
 ) -> int:
     """把排班槽位挂到对应岗位（岗位表的子表），返回未匹配到编制表岗位的槽位数。
 
-    匹配策略：优先按 (业态, 岗位名) 精确匹配编制表岗位；同业态无匹配时
-    fallback 到不限业态的轮询匹配，兼容排班表业态与编制表业态不一致的情况。
+    匹配策略（由严到宽）：
+      1. 「带班次标签的岗位名」精确匹配 —— 槽位带（白）/（晚）且编制表同名岗位也
+         带相同标签时必须命中。这是白/晚班不串岗的关键；
+      2. 「不带标签的岗位名」聚合匹配 —— 排班表或编制表任一方未标班次时的兜底；
+    同业态优先；无匹配时 fallback 到不限业态的轮询匹配，兼容排班表业态与
+    编制表业态不一致的情况。
+
     slot_tuples: (slot, position_name, raw_position, business_type)。
     """
-    # pos_index: strip 后岗位名 → [(业态, Position), ...]
+    # pos_index:     strip 后岗位名 → [(业态, Position), ...]（不带班次标签，兜底用）
+    # pos_index_tag: 带班次标签的岗位名 → [(业态, Position), ...]（精确挂接用）
     pos_index: dict[str, list] = {}
+    pos_index_tag: dict[str, list] = {}
     for pi in position_infos:
         for p in pi.positions:
             key = strip_position_time_suffix(p.position_name)
             pos_index.setdefault(key, []).append((pi.business_type, p))
+            tagged_key = position_name_with_shift_tag(p.position_name)
+            if tagged_key != key:
+                pos_index_tag.setdefault(tagged_key, []).append((pi.business_type, p))
 
     name_counter: dict[str, int] = {}
 
     unmatched = 0
-    for slot, position_name, _raw_position, business_type in slot_tuples:
+    for slot, position_name, raw_position, business_type in slot_tuples:
         contract_pos_name = _map_schedule_position_to_contract(position_name)
         np_ = strip_position_time_suffix(contract_pos_name)
-        candidates = pos_index.get(np_)
+
+        # 优先按「带班次标签」的岗位名精确匹配：白班槽位只挂白班岗位，晚班槽位只挂晚班岗位。
+        # 标签优先取排班表原始岗位名（raw_position，"东门门岗（晚）"），
+        # 因为 position_name 已被 strip 掉标签。
+        shift_tag = (
+            extract_position_shift_tag(raw_position)
+            or extract_position_shift_tag(contract_pos_name)
+        )
+        match_key = f"{np_}({shift_tag})" if shift_tag else np_
+        candidates = pos_index_tag.get(match_key)
+        if not candidates:
+            # 兜底：编制表未标班次（或排班表未标班次）时退回不带标签的聚合匹配
+            match_key = np_
+            candidates = pos_index.get(np_)
+
         target = None
         if candidates:
             # 优先匹配同业态
             same_biz = [c for c in candidates if c[0] == business_type]
             pool = same_biz if same_biz else candidates
-            idx = name_counter.get(np_, 0) % len(pool)
-            name_counter[np_] = idx + 1
+            idx = name_counter.get(match_key, 0) % len(pool)
+            name_counter[match_key] = idx + 1
             target = pool[idx][1]
         if target is None:
             target = _ensure_synthetic_position(position_infos, position_name, business_type)
@@ -368,6 +394,14 @@ def _detect_contract_columns(headers: list[str]) -> dict[str, int]:
     """从表头自动检测列索引，兼容不同列顺序/有无"岗位归属"列的 Excel。
 
     关键词匹配优先级：精确包含 → 模糊包含。
+
+    单价列的关键约定（务必保持）：
+    - 「工时单价 / 小时单价 / 时薪」→ hourly_rate（时薪，扣款计算基准）
+    - 「岗位单价（月/元）/ 月单价」→ monthly_rate（月单价，**不参与扣款**）
+    - 只写「单价」且无更明确的时薪列时 → 按旧逻辑兜底为 hourly_rate
+    之所以要区分，是因为两种表头都含"单价"子串；若用模糊的 `"单价" in h`
+    统一处理，"岗位单价（月/元）"（列序靠后）会覆盖"工时单价"，把月单价
+    （如 5400）当成时薪，导致缺岗/缺勤扣款被放大数十~数百倍。
     """
     col_map: dict[str, int] = {}
     for i, h in enumerate(headers):
@@ -390,7 +424,15 @@ def _detect_contract_columns(headers: list[str]) -> dict[str, int]:
             col_map["daily_hours"] = i
         elif "月总时长" in h_lower or "月时长" in h_lower:
             col_map["monthly_hours"] = i
-        elif "单价" in h_lower:
+        elif "工时单价" in h_lower or "小时单价" in h_lower or "时薪" in h_lower:
+            # 明确的小时单价（时薪）—— hourly_rate 的唯一权威来源
+            col_map["hourly_rate"] = i
+        elif "月单价" in h_lower or ("单价" in h_lower and "月" in h_lower):
+            # 「岗位单价（月/元）」= 月单价，绝不能当作时薪：
+            # 一旦误当 hourly_rate，daily_rate = 月单价 × 日时长，扣款会被放大数十~数百倍。
+            col_map["monthly_rate"] = i
+        elif "单价" in h_lower and "hourly_rate" not in col_map:
+            # 兜底：表头只写「单价」且没有更明确的时薪列时，沿用旧逻辑按小时单价处理
             col_map["hourly_rate"] = i
         elif "月度合价" in h_lower or "合价" in h_lower:
             col_map["monthly_total"] = i
@@ -417,6 +459,17 @@ def _parse_contract_positions(ws) -> list[tuple[str, Position]]:
 
     headers = [_safe_str(v) for v in all_rows[0]]
     col_map = _detect_contract_columns(headers)
+
+    # 只有月单价、没有时薪列时给出显式告警：此时 hourly_rate 会解析为 0，
+    # 而不是把月单价错当成时薪（后者会把扣款放大数十~数百倍）。
+    if "hourly_rate" not in col_map and "monthly_rate" in col_map:
+        _mr_idx = col_map["monthly_rate"]
+        _mr_name = headers[_mr_idx] if _mr_idx < len(headers) else "?"
+        print(
+            f"[解析警告] 合同编制表只检测到月单价列「{_mr_name}」，"
+            "未找到「工时单价/小时单价/时薪」列；这些小时间费率将解析为 0。"
+            "请确认 Excel 是否缺少时薪列，或表头命名是否规范。"
+        )
 
     pos_name_idx = col_map.get("position_name", 2)
     biz_idx = col_map.get("business_type", 1)
@@ -452,7 +505,8 @@ def _parse_contract_positions(ws) -> list[tuple[str, Position]]:
             monthly_total=_safe_float(_col("monthly_total", 0)),
             actual_count=int(_safe_float(_col("actual_count", 0))),
             mid_clock_time=_safe_str(_col("mid_clock", "")),
-            is_cross_midnight=_safe_str(_col("cross_midnight", "")) == "是",
+            cross_midnight_raw=_safe_str(_col("cross_midnight", "")),
+            is_cross_midnight=cross_midnight_raw == "是",
         )
         positions.append((last_biz_type, position))
     return positions

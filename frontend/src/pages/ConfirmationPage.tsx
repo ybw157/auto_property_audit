@@ -3,6 +3,8 @@ import { request } from '../services/api'
 import type { AuditContext } from '../types'
 import { useAuditContext } from '../hooks/useAuditContext'
 import { useAuth } from '../hooks/useAuth'
+import { useServiceTypes } from '../hooks/useServiceTypes'
+import { ServiceTypeTabs } from '../components/ServiceTypeTabs'
 
 interface DeductionDetail {
   employee_name: string
@@ -43,6 +45,7 @@ interface ExceptionRecord {
   confirmed?: boolean
   note?: string
   free_deduction?: boolean
+  window?: string
 }
 
 interface S04AuditData {
@@ -78,12 +81,13 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
     }
 
     for (const dateStr of d.missing_clock_dates || []) {
-      const conf = confs[dateStr]
+      const missingKey = `missing_clock|${d.employee_name}|${dateStr}`
+      const conf = confs[missingKey]
       const rec = missingByDate.get(dateStr)
       const shift = rec ? `${rec.shift_start || ''}-${rec.shift_end || ''}` : ''
       const clocks = rec ? (rec.clock_times || []).join('\n') : ''
       records.push({
-        key: `missing|${d.employee_name}|${dateStr}`,
+        key: missingKey,
         employee_name: d.employee_name,
         work_date: dateStr,
         position: rec?.position || d.position,
@@ -100,21 +104,25 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
     }
     for (const issue of d.mid_clock_issues || []) {
       const dateStr = issue.date || ''
-      const confKey = `mid|${d.employee_name}|${dateStr}|${issue.window || ''}`
+      const windowTag = issue.window || ''
+      const confKey = windowTag
+        ? `mid_clock|${d.employee_name}|${dateStr}|${windowTag}`
+        : `mid_clock|${d.employee_name}|${dateStr}`
       const conf = confs[confKey]
       const missing = issue.missing || 0
-      const meta = midByKey.get(`${dateStr}|${issue.window || ''}`)
+      const meta = midByKey.get(`${dateStr}|${windowTag}`)
       const shift = meta ? `${meta.shift_start || ''}-${meta.shift_end || ''}` : ''
       const clocks = meta ? (meta.clock_times || []).join('\n') : ''
       records.push({
         key: confKey,
         employee_name: d.employee_name,
         work_date: dateStr,
+        window: windowTag,
         position: meta?.position || issue.position || d.position,
         exception_type: 'mid_clock',
         exception_label: '中间卡缺失',
         amount: missing * 50,
-        detail: `${issue.window || ''} 缺${missing}次，扣款${missing * 50}元`,
+        detail: `${windowTag} 缺${missing}次，扣款${missing * 50}元`,
         shift_time: shift,
         clock_times: clocks,
         confirmed: conf?.confirmed ?? false,
@@ -147,7 +155,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
     }
     for (const early of d.early_leave_details || []) {
       const dateStr = early.date || ''
-      const confKey = `early|${d.employee_name}|${dateStr}`
+      const confKey = `early_leave|${d.employee_name}|${dateStr}`
       const conf = confs[confKey]
       const tierLabel = early.tier === 'S04-2' ? '早退≤30min' : early.tier === 'S04-3' ? '早退30-60min' : '早退>60min(转漏打卡)'
       const shift = early.shift_start ? `${early.shift_start}-${early.shift_end || ''}` : ''
@@ -231,10 +239,19 @@ export function ConfirmationPage() {
   } | null>(null)
   const [allRecords, setAllRecords] = useState<ExceptionRecord[]>([])
   const [isLocked, setIsLocked] = useState(false)
+  const { options: serviceTypeOptions, active: activeServiceType, setActive: setActiveServiceType } =
+    useServiceTypes(auditContext ?? null)
+  const effectiveServiceType = activeServiceType || auditContext?.service_type || ''
 
   useEffect(() => {
-    if (auditContext) loadData()
-  }, [auditContext])
+    if (!auditContext) return
+    // 切换服务类型时清空上一类型的选择状态，避免勾选被带到另一个服务类型
+    setSelectedEmployee('')
+    setConfirmMap({})
+    setFreeDeductionMap({})
+    setFinalizeResult(null)
+    loadData(effectiveServiceType)
+  }, [auditContext, effectiveServiceType])
 
   useEffect(() => {
     if (s04Data && s04Data.deduction_details.length && !selectedEmployee) {
@@ -246,8 +263,9 @@ export function ConfirmationPage() {
     }
   }, [s04Data, allRecords])
 
-  async function loadData() {
+  async function loadData(serviceOverride?: string) {
     if (!auditContext) return
+    const svc = serviceOverride ?? effectiveServiceType
     setLoading(true)
     setMessage('')
     try {
@@ -255,6 +273,7 @@ export function ConfirmationPage() {
         project_name: auditContext.project_name,
         business_type: auditContext.business_type,
         audit_month: auditContext.audit_month,
+        service_type: svc,
       })
       const detail = await request<any>(`/api/v2/audit-results/detail?${params}`)
       const resultsJson = typeof detail?.results_json === 'string' ? JSON.parse(detail.results_json) : detail?.results_json
@@ -331,12 +350,13 @@ export function ConfirmationPage() {
     if (!auditContext || !s04Data || isLocked) return
     setSaving(true)
     setMessage('')
-    const records: Array<{ employee_name: string; work_date: string; exception_type: string; confirmed: boolean; confirm_note: string; free_deduction: boolean }> = []
+    const records: Array<{ employee_name: string; work_date: string; exception_type: string; window: string; confirmed: boolean; confirm_note: string; free_deduction: boolean }> = []
     for (const r of allRecords) {
       records.push({
         employee_name: r.employee_name,
         work_date: r.work_date,
         exception_type: r.exception_type,
+        window: r.window || '',
         confirmed: confirmMap[r.key] ?? false,
         confirm_note: '',
         free_deduction: freeDeductionMap[r.key] ?? false,
@@ -350,6 +370,7 @@ export function ConfirmationPage() {
           project_name: auditContext.project_name,
           business_type: auditContext.business_type,
           audit_month: auditContext.audit_month,
+          service_type: effectiveServiceType,
           confirmed_records: records,
           confirmed_by: user?.username || '审核员',
         }),
@@ -375,6 +396,7 @@ export function ConfirmationPage() {
           project_name: auditContext.project_name,
           business_type: auditContext.business_type,
           audit_month: auditContext.audit_month,
+          service_type: effectiveServiceType,
         }),
       })
       setFinalizeResult({
@@ -387,7 +409,7 @@ export function ConfirmationPage() {
       setMessage('审核结果已锁定，正在生成审核汇总与扣款报告...')
       // "生成扣款报告"即生成汇总与扣款报告（内含扣款明细）
       await request(
-        `/api/v2/reports/generate?project_name=${encodeURIComponent(auditContext.project_name)}&business_type=${encodeURIComponent(auditContext.business_type)}&audit_month=${encodeURIComponent(auditContext.audit_month)}&report_type=summary`,
+        `/api/v2/reports/generate?project_name=${encodeURIComponent(auditContext.project_name)}&business_type=${encodeURIComponent(auditContext.business_type)}&audit_month=${encodeURIComponent(auditContext.audit_month)}&service_type=${encodeURIComponent(effectiveServiceType)}&report_type=summary`,
         { method: 'POST' }
       )
       setMessage(result.message || '审核汇总与扣款报告已生成，可前往"PDF报告"页下载。')
@@ -398,9 +420,23 @@ export function ConfirmationPage() {
     setFinalizing(false)
   }
 
+  const nav = (
+    <ServiceTypeTabs options={serviceTypeOptions} value={activeServiceType} onChange={setActiveServiceType} />
+  )
+
   if (!auditContext) return <div className="text-slate-500">请先完成一次审核</div>
-  if (loading) return <div className="text-slate-500">加载中...</div>
-  if (!s04Data || !s04Data.deduction_details.length) return <div className="card p-8 text-center text-slate-500">本次审核无异常记录</div>
+  if (loading) return (
+    <div className="space-y-4">
+      {nav}
+      <div className="text-slate-500">加载中...</div>
+    </div>
+  )
+  if (!s04Data || !s04Data.deduction_details.length) return (
+    <div className="space-y-4">
+      {nav}
+      <div className="card p-8 text-center text-slate-500">该服务类型本次审核无异常记录</div>
+    </div>
+  )
 
   const empRecordsMap: Record<string, ExceptionRecord[]> = {}
   for (const r of allRecords) {
@@ -420,12 +456,13 @@ export function ConfirmationPage() {
 
   return (
     <div className="space-y-4">
+      {nav}
       {/* 顶部信息栏 */}
       <div className="card flex items-center justify-between p-5">
         <div>
           <h2 className="text-lg font-semibold text-slate-900">考勤异常确认表</h2>
           <p className="mt-1 text-sm text-slate-500">
-            {auditContext.project_name} {auditContext.audit_month} | 共 {totalExceptions} 条异常 | 已确认 {confirmedCount} 条 | 免打卡 {freeDeductionCount} 条
+            {auditContext.project_name} {auditContext.audit_month}{effectiveServiceType ? ` | ${effectiveServiceType}` : ''} | 共 {totalExceptions} 条异常 | 已确认 {confirmedCount} 条 | 免打卡 {freeDeductionCount} 条
           </p>
         </div>
         <div className="flex items-center gap-3">

@@ -5,6 +5,8 @@ import { request } from '../services/api'
 import type { AuditContext } from '../types'
 import { useAuditContext } from '../hooks/useAuditContext'
 import { useAuth } from '../hooks/useAuth'
+import { useServiceTypes } from '../hooks/useServiceTypes'
+import { ServiceTypeTabs } from '../components/ServiceTypeTabs'
 
 const tabs = [
   ['exceptions', '人员异常统计'],
@@ -32,10 +34,11 @@ const columnLabels: Record<string, string> = {
   total_deduction: '扣款合计',
   summary_item: '汇总项目',
   missing_clock_free_limit: '免扣次数',
+  overtime_warning: '工时异常',
 }
 
 const tabColumns: Record<string, string[]> = {
-  exceptions: ['employee_name', 'position', 'missing_clock_count', 'late_count', 'early_leave_count', 'absence_count', 'cross_assignment_warning', 'absence_daily_rate', 'total_deduction'],
+  exceptions: ['employee_name', 'position', 'missing_clock_count', 'late_count', 'early_leave_count', 'absence_count', 'overtime_warning', 'absence_daily_rate', 'total_deduction'],
   'attendance-deductions': ['employee_name', 'position', 'exception_type', 'deduction_amount'],
   deductions: ['summary_item', 'deduction_amount'],
 }
@@ -65,6 +68,10 @@ export function AuditResults() {
   const auditMonth = auditContext?.audit_month || ''
   const businessType = auditContext?.business_type || ''
   const serviceType = auditContext?.service_type || ''
+  const { options: serviceTypeOptions, active: activeServiceType, setActive: setActiveServiceType } =
+    useServiceTypes(auditContext ?? null)
+  // 导航未加载完成时先沿用上下文里的服务类型，避免首屏多一次空请求
+  const effectiveServiceType = activeServiceType || serviceType
 
   // 当 auditContext 为空时，自动从后端查询最近的审核结果
   useEffect(() => {
@@ -178,7 +185,8 @@ export function AuditResults() {
         absence_count: d.absence_count ?? (Array.isArray(d.absence_dates) ? (d.absence_dates as unknown[]).length : 0),
         absence_daily_rate: Number(d.absence_daily_rate || 0),
         total_deduction: Number(d.total_deduction || 0),
-        cross_assignment_count: Array.isArray(d.cross_assignment_warnings) ? d.cross_assignment_warnings.length : 0,
+        overtime_count: Array.isArray(d.overtime_warnings) ? d.overtime_warnings.length : 0,
+        overtime_warnings: d.overtime_warnings || [],
         // 扣款合计的计算公式（仅用于展示，不在 columns 里），如：缺勤1次×日服务费190.68元×1.2
         deduction_formula: buildDeductionFormula(d),
       }))
@@ -219,7 +227,12 @@ export function AuditResults() {
 
   useEffect(() => {
     if (!auditContext) return
-    const params = new URLSearchParams({ project_name: projectName, business_type: businessType, audit_month: auditMonth })
+    const params = new URLSearchParams({
+      project_name: projectName,
+      business_type: businessType,
+      audit_month: auditMonth,
+      service_type: effectiveServiceType,
+    })
     request<Record<string, unknown>>(`/api/v2/audit-results/detail?${params}`)
       .then((detail) => {
         setDetailData(detail)
@@ -243,7 +256,7 @@ export function AuditResults() {
         setRows([])
         setDashboard({ attendanceDetails: [], positionFulfillment: [], exceptions: [], attendanceDeductions: [], deductions: [], s04Summary: {}, deductionDetails: [], crossProjectReview: [], crossProjectResolved: [] })
       })
-  }, [auditContext])
+  }, [auditContext, effectiveServiceType])
 
   useEffect(() => {
     if (!auditContext || !detailData) return
@@ -267,7 +280,12 @@ export function AuditResults() {
   async function confirmFinal() {
     if (!auditContext) return
     try {
-      const params = new URLSearchParams({ project_name: projectName, business_type: businessType, audit_month: auditMonth })
+      const params = new URLSearchParams({
+        project_name: projectName,
+        business_type: businessType,
+        audit_month: auditMonth,
+        service_type: effectiveServiceType,
+      })
       await request(`/api/v2/audit-results/confirm?${params}`, { method: 'POST' })
       setMessage('审核结果已确认并锁定')
     } catch (error) {
@@ -287,12 +305,13 @@ export function AuditResults() {
           <div>
             <h2 className="text-base font-semibold text-slate-900">审核确认</h2>
             <p className="mt-1 text-sm text-slate-500">
-              {projectName} {auditMonth} {businessType ? `· ${businessType}` : ''} · 版本 {String(detailData?.version ?? '-')}
+              {projectName} {auditMonth} {businessType ? `· ${businessType}` : ''}{effectiveServiceType ? ` · ${effectiveServiceType}` : ''} · 版本 {String(detailData?.version ?? '-')}
               {isLocked ? ' · 已锁定' : ''}
             </p>
           </div>
           <button className="btn-primary" disabled={isLocked} onClick={confirmFinal}>{isLocked ? '已确认' : '确认最终版'}</button>
         </div>
+        <ServiceTypeTabs options={serviceTypeOptions} value={activeServiceType} onChange={setActiveServiceType} />
         {message && <div className="mt-3 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">{message}</div>}
       </div>
       <AuditDashboard data={dashboard} />
@@ -394,12 +413,12 @@ function trimNum(value: number): string {
   return String(Math.round(value * 100) / 100)
 }
 
-/** 人员异常统计表的单元格渲染：扣款合计列在金额下方展示计算公式；串岗警告列显示琥珀色标记 */
+/** 人员异常统计表的单元格渲染：扣款合计列在金额下方展示计算公式；工时异常列显示琥珀色标记 */
 function renderExceptionCell(row: Record<string, unknown>, key: string): ReactNode {
-  if (key === 'cross_assignment_warning') {
-    const warnings = row.cross_assignment_warnings as Array<{ date: string; positions: string[]; message: string }> | undefined
+  if (key === 'overtime_warning') {
+    const warnings = row.overtime_warnings as Array<{ date: string; positions: string[]; total_hours: number; message: string }> | undefined
     if (!warnings || warnings.length === 0) return <span className="text-slate-300">—</span>
-    const title = warnings.map((w) => `${w.date}：${(w.positions || []).join(' / ')}`).join('\n')
+    const title = warnings.map((w) => `${w.date}：${w.total_hours}h (${(w.positions || []).join(' / ')})`).join('\n')
     return (
       <span title={title} className="inline-flex items-center gap-1 rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
         ⚠ {warnings.length} 天
@@ -442,25 +461,27 @@ function AuditDashboard({ data }: { data: DashboardData }) {
   const lateAmount = Number(s04Summary.total_late_amount || 0)
   const earlyAmount = Number(s04Summary.total_early_leave_amount || 0)
   const absenceAmount = Number(s04Summary.total_absence_amount || 0)
-  const crossWarnings = data.deductionDetails.flatMap((d) => {
-    const warnings = d.cross_assignment_warnings as Array<{ date: string; positions: string[]; message: string }> | undefined
+  const overtimeWarnings = data.deductionDetails.flatMap((d) => {
+    const warnings = d.overtime_warnings as Array<{ date: string; positions: string[]; total_hours: number; message: string }> | undefined
     return (warnings || []).map((w) => ({ ...w, employee_name: String(d.employee_name || '') }))
   })
-  const hasCrossWarnings = crossWarnings.length > 0
+  const hasOvertimeWarnings = overtimeWarnings.length > 0
   return (
     <div className="space-y-5">
-      {hasCrossWarnings && (
+      {hasOvertimeWarnings && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
           <div className="flex items-start gap-2">
-            <span className="text-amber-600 font-medium text-sm">串岗警告</span>
-            <span className="text-amber-500 text-xs">（{crossWarnings.length} 条，当天已跳过扣款）</span>
+            <span className="text-amber-600 font-medium text-sm">工时异常警告</span>
+            <span className="text-amber-500 text-xs">（{overtimeWarnings.length} 条，单日工时超 20h，当天已跳过扣款）</span>
           </div>
           <div className="mt-2 max-h-48 space-y-1 overflow-y-auto">
-            {crossWarnings.map((w, i) => (
+            {overtimeWarnings.map((w, i) => (
               <div key={i} className="text-sm text-amber-800">
                 <span className="font-medium">{w.employee_name}</span>
                 <span className="mx-1 text-amber-500">|</span>
                 <span>{w.date}</span>
+                <span className="mx-1 text-amber-500">|</span>
+                <span>{w.total_hours}h</span>
                 <span className="mx-1 text-amber-500">|</span>
                 <span>{w.positions?.join(' / ')}</span>
               </div>

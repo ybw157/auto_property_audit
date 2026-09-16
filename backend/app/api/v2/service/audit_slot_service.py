@@ -28,6 +28,7 @@ from app.api.v2.utils.audit_common import (
     split_cross_day_clocks,
     shift_from_raw_position,
     get_next_date,
+    resolve_cross_midnight,
 )
 
 
@@ -99,18 +100,22 @@ def _build_bi_index(bi_records: list[dict], audit_month: str):
 def _build_person_shift_index(position_infos: list[PositionInfo]) -> dict[tuple[str, str], Any]:
     """从 Position.shift_time 解析班次，构建 (归一化姓名,日期)->班次，
     供跨天打卡拆分（夜班次日的下班卡归属前一天）使用。
+
+    同时按「编制表 cross_midnight 字段优先、时间数值关系兜底」解析跨夜标志，
+    与 S04 考勤审核的跨夜判定保持一致。
     """
     index: dict[tuple[str, str], Any] = {}
     for pi in position_infos:
         for p in pi.positions:
             shift = shift_from_raw_position(p.shift_time)
+            is_cross = resolve_cross_midnight(p.cross_midnight_raw, shift.start_time, shift.end_time)
             for slot in p.slots:
                 for work_date, cells in slot.daily.items():
                     for cell in cells:
                         for name in cell.get("names", []):
                             nn = normalize_employee_name(name)
                             if nn:
-                                index[(nn, work_date)] = shift
+                                index[(nn, work_date)] = (shift, is_cross)
     return index
 
 
@@ -124,9 +129,11 @@ def _is_on_duty(
     clocks = attendance_by_person_date.get((name, work_date), [])
     if not clocks:
         return False, [], []
-    prev_shift = person_shift_index.get((name, get_next_date(work_date)))
+    entry = person_shift_index.get((name, get_next_date(work_date)))
     # prev_shift 是「前一天夜班」；次日清晨的卡若早于该夜班下班，属前一天
-    today_clocks, prev_clocks = split_cross_day_clocks(clocks, prev_shift)
+    prev_shift = entry[0] if entry else None
+    is_cross = entry[1] if entry else None
+    today_clocks, prev_clocks = split_cross_day_clocks(clocks, prev_shift, is_cross)
     return (len(today_clocks) > 0), today_clocks, prev_clocks
 
 

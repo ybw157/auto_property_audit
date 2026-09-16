@@ -13,7 +13,7 @@ from app.api.v2.models.contract_models import ContractRecord
 logger = logging.getLogger(__name__)
 
 
-def _rules_complete(rules) -> bool:
+def _rules_complete(rules: object) -> bool:
     """细则是否包含审核前置校验必需的字段（迟到/早退分档 + 漏打卡扣款）。"""
     if not isinstance(rules, dict):
         return False
@@ -70,12 +70,16 @@ def _save_or_update(original_name: str, ext: str, storage_path: str, **fields) -
         return record.to_dict()
 
 
-def _resolve_project_name(parsed_project: str, fallback: str, force_project_name: bool) -> str:
+def _resolve_project_name(parsed_project: str | None, fallback: str, force_project_name: bool) -> str:
     """决定最终入库的项目名。
 
     文件解析出的项目名经常不准确（例如从文件名里截出"以外的其他保"），
     而列表查询又是按登录账号的项目名精确过滤的，两者不一致就会导致
     合同存进去了却永远查不出来。因此非管理员上传时强制使用账号绑定的项目名。
+
+    :param parsed_project: 解析结果里的项目名，解析失败或字段缺失时为 None
+    :param fallback: 登录账号绑定的项目名，作为兜底
+    :param force_project_name: 为 True 时忽略解析值，一律使用 fallback
     """
     parsed_project = _normalize_project_name(parsed_project or "")
     if force_project_name:

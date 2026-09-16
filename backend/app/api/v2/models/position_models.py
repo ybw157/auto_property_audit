@@ -43,7 +43,8 @@ class Position:
     monthly_total: float = 0.0 #月度合价
     actual_count: int = 0 #实际人数
     mid_clock_time: str = "" #中班打卡时间
-    is_cross_midnight: bool = False #是否跨 midnight
+    is_cross_midnight: bool = False #是否跨 midnight（由 cross_midnight_raw 推导：=="是"）
+    cross_midnight_raw: str = "" #编制表 cross_midnight 原始值（"是"/"否"/空白），用于跨夜兜底判定
     slots: list[ScheduleSlot] = field(default_factory=list) #排班槽位列表
 
     def to_dict(self) -> dict:

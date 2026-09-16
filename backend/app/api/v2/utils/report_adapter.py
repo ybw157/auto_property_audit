@@ -13,18 +13,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any
 
-
-def _detect_cross_midnight(start: str, end: str) -> bool:
-    """根据班次时间自动检测是否跨天：结束 <= 开始 → 跨天。"""
-    if not start or not end:
-        return False
-    def _to_min(t):
-        m = re.match(r"(\d{1,2}):(\d{2})", str(t).strip())
-        return int(m.group(1)) * 60 + int(m.group(2)) if m else None
-    s, e = _to_min(start), _to_min(end)
-    if s is None or e is None:
-        return False
-    return e <= s
+from app.api.v2.utils.audit_common import resolve_cross_midnight
 
 
 def _next_date(iso_date: str) -> str:
@@ -101,7 +90,7 @@ def _build_attendance_details(
     for p in position_data or []:
         pos_name = p.get("position_name", "") or p.get("position", "")
         pos_shift_time = p.get("shift_time", "") or ""
-        pos_cross_midnight = bool(p.get("is_cross_midnight", False))
+        pos_cross_midnight_raw = p.get("cross_midnight_raw", "") or ""
         # 从 position 级别 shift_time 解析 start/end（slot 里通常没有这俩字段）
         pos_start = ""
         pos_end = ""
@@ -127,7 +116,7 @@ def _build_attendance_details(
                             "shift_name": shift_name or pos_shift_time,
                             "shift_start_time": shift_start,
                             "shift_end_time": shift_end,
-                            "is_cross_midnight": pos_cross_midnight or _detect_cross_midnight(shift_start, shift_end),
+                            "is_cross_midnight": resolve_cross_midnight(pos_cross_midnight_raw, shift_start, shift_end),
                         }
 
     # 2) BI 打卡索引：(employee_name, date) -> [clocks]
@@ -318,7 +307,7 @@ def _build_attendance_deductions(
         missing_count = detail.get("missing_clock_count", 0) or len(missing_dates)
         per_amount = missing_amount / max(missing_count, 1) if missing_count > 0 and missing_amount > 0 else 0
         for date_str in missing_dates:
-            key = f"missing|{name}|{date_str}"
+            key = f"missing_clock|{name}|{date_str}"
             if not _is_confirmed(key):
                 continue
             free = _is_free(key)
@@ -354,7 +343,7 @@ def _build_attendance_deductions(
         # ── 早退 ──
         for early in detail.get("early_leave_details", []) or []:
             date_str = early.get("date", "")
-            key = f"early|{name}|{date_str}"
+            key = f"early_leave|{name}|{date_str}"
             if not _is_confirmed(key):
                 continue
             free = _is_free(key)
@@ -396,7 +385,7 @@ def _build_attendance_deductions(
         for issue in detail.get("mid_clock_issues", []) or []:
             date_str = issue.get("date", "")
             window = issue.get("window", "")
-            key = f"mid|{name}|{date_str}|{window}"
+            key = f"mid_clock|{name}|{date_str}|{window}" if window else f"mid_clock|{name}|{date_str}"
             if not _is_confirmed(key):
                 continue
             free = _is_free(key)

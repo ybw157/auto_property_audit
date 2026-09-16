@@ -22,10 +22,11 @@ def get_results(
     request: Request,
     project_name: str = "",
     audit_month: str = "",
+    business_type: str = "",
 ):
-    """获取审核结果列表。"""
+    """获取审核结果列表（可按业态收窄，前端据此去重出服务类型导航）。"""
     project_name = resolve_project_name(request, project_name)
-    data = list_audit_results(project_name, audit_month)
+    data = list_audit_results(project_name, audit_month, business_type)
     return Result.ok(data=data)
 
 
@@ -61,11 +62,12 @@ def confirm_audit_endpoint(
     project_name: str,
     business_type: str,
     audit_month: str,
+    service_type: str = "",
 ):
-    """确认审核结果。"""
+    """确认审核结果（只锁定指定服务类型那一条）。"""
     current = get_current_user(request)
     project_name = resolve_project_name(request, project_name)
-    data = confirm_audit(project_name, business_type, audit_month, current["username"])
+    data = confirm_audit(project_name, business_type, audit_month, current["username"], service_type)
     return Result.ok(data=data)
 
 
@@ -82,6 +84,7 @@ def update_audit_result_endpoint(
         results_json=body.results_json,
         summary_json=body.summary_json,
         status=body.status,
+        service_type=getattr(body, "service_type", "") or "",
     )
     return Result.ok(data=data, message="审核结果更新成功")
 
@@ -99,6 +102,7 @@ def confirm_exceptions_endpoint(
         audit_month=body.audit_month,
         confirmed_records=[r.model_dump() for r in body.confirmed_records],
         confirmed_by=current["username"],
+        service_type=getattr(body, "service_type", "") or "",
     )
     return Result.ok(data=data, message=data["message"])
 
@@ -109,13 +113,15 @@ def finalize_audit_endpoint(
     project_name: str = Body(..., description="项目名称"),
     business_type: str = Body(..., description="业态"),
     audit_month: str = Body(..., description="审核月份"),
+    service_type: str = Body("", description="服务类型（保安/保洁）"),
 ):
-    """确认最终版：计算最终扣款并锁定审核结果。"""
+    """确认最终版：计算最终扣款并锁定审核结果（只锁定指定服务类型那一条）。"""
     current = get_current_user(request)
     data = finalize_audit(
         project_name=resolve_project_name(request, project_name),
         business_type=business_type,
         audit_month=audit_month,
         confirmed_by=current["username"],
+        service_type=service_type or "",
     )
     return Result.ok(data=data, message=data["message"])
