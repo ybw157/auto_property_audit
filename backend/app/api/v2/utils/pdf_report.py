@@ -77,15 +77,19 @@ def _finalize_report_info(info: dict, audit_month: str) -> dict:
 # ─────────────────────── 服务类型划分与数据过滤 ───────────────────────
 
 def _classify_service(pos: dict) -> str:
-    """根据岗位的 职位归属(position_type) 或岗位名关键字判定服务类型。"""
+    """根据岗位的 职位归属(position_type) 或岗位名关键字判定服务类型。
+
+    position_type 的实际取值是「保洁岗 / 安保岗 / 保安员 / 管理岗 …」而非裸的
+    「保洁 / 保安」，因此先去掉「岗/员/队」等后缀再判定，避免全部分组落空。
+    """
     pt = str(pos.get("position_type") or "").strip()
     pn = str(pos.get("position_name") or "")
-    if pt in ("保安", "保洁"):
-        return pt
-    if "保安" in pn:
-        return "保安"
-    if "保洁" in pn:
-        return "保洁"
+    for field_ in (pt, pn):
+        cleaned = re.sub(r"[岗员队工]", "", field_)
+        if "保安" in cleaned or "安保" in cleaned or "安管" in cleaned:
+            return "保安"
+        if "保洁" in cleaned or "清洁" in cleaned:
+            return "保洁"
     return "其他"
 
 
@@ -187,7 +191,6 @@ def _build_multi_service_pdf(
         if position_info and position_info.positions else []
     )
     bi_records = bi_dao.get_bi_by_project(audit_month, project_name)
-    groups = _group_positions_by_service(position_data_all)
 
     audit_items = _normalize_audit_input(audit_input)
     # 去重 service_type，保持顺序
@@ -224,8 +227,15 @@ def _build_multi_service_pdf(
         item = next(it for it in audit_items if (it.get("service_type") or "").strip() == st)
         results_data = item.get("results") or {}
 
-        # 岗位子集：优先取按岗位归类到该服务类型的部分；若未标注则共用全部岗位
-        pos_subset = groups.get(st) or position_data_all
+        # 岗位子集：先取该服务类型自己的排班记录（库里已按 service_type 分行存储），
+        # 再按岗位归类裁剪；两者都取不到时才回退到全量岗位（兼容改造前的历史数据）。
+        pi_st = position_dao.get_position_info(project_name, business_type, audit_month, st or "")
+        pos_data_st = (
+            [p.to_dict() for p in pi_st.positions]
+            if pi_st and pi_st.positions else []
+        )
+        groups = _group_positions_by_service(pos_data_st or position_data_all)
+        pos_subset = groups.get(st) or pos_data_st or position_data_all
         emp_subset = _employees_of_positions(pos_subset)
         bi_subset = (
             _filter_bi_by_employees(bi_records, emp_subset)

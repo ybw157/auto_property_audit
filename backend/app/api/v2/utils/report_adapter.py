@@ -381,11 +381,13 @@ def _build_attendance_deductions(
                 "rule_name": "缺勤",
             })
 
-        # ── 中间卡缺失 ──
+        # ── 中间卡缺失（并入「漏打卡」口径，优先读 missing_clock| 键，回退 mid_clock| 兼容历史）──
         for issue in detail.get("mid_clock_issues", []) or []:
             date_str = issue.get("date", "")
             window = issue.get("window", "")
-            key = f"mid_clock|{name}|{date_str}|{window}" if window else f"mid_clock|{name}|{date_str}"
+            mc_key = f"missing_clock|{name}|{date_str}|{window}" if window else f"missing_clock|{name}|{date_str}"
+            legacy_key = f"mid_clock|{name}|{date_str}|{window}" if window else f"mid_clock|{name}|{date_str}"
+            key = mc_key if mc_key in confirmations else legacy_key
             if not _is_confirmed(key):
                 continue
             free = _is_free(key)

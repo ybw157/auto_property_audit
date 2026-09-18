@@ -82,9 +82,7 @@ export function AiAudit() {
     if (!projectFile) return setMessage('请选择修改后的项目基础资料.xlsx')
     setLoading(true)
     try {
-      const form = new FormData()
-      form.append('file', projectFile)
-      await request('/api/v2/positions/upload', { method: 'POST', body: form })
+      await request('/api/v2/positions/upload', { method: 'POST', body: buildUploadForm(projectFile) })
       const auditMonthFormatted = auditMonth.replace('-', '')
       const result = await request<StartAuditResult>('/api/v2/audit-results/start', {
         method: 'POST',
@@ -102,14 +100,22 @@ export function AiAudit() {
     }
   }
 
+  // 上传排班表时把「选择审核月」「选择服务类型」的选中值一并提交：
+  // 岗位信息表的月份与服务类型必须取自这两个控件，服务端不再从文件名/Sheet 名推断。
+  function buildUploadForm(file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('audit_month', auditMonth)
+    form.append('service_type', serviceType)
+    return form
+  }
+
   async function autoUploadProject(file: File) {
     setLoading(true)
     try {
-      const form = new FormData()
-      form.append('file', file)
-      await request('/api/v2/positions/upload', { method: 'POST', body: form })
+      await request('/api/v2/positions/upload', { method: 'POST', body: buildUploadForm(file) })
       setUploaded(true)
-      setMessage(`项目基础资料已上传：${file.name}，可点击「开始AI审核」发起审核。`)
+      setMessage(`项目基础资料已上传：${file.name}（审核月 ${auditMonth.replace('-', '')}／服务类型 ${serviceType || '未指定'}），可点击「开始AI审核」发起审核。`)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '上传失败')
     } finally {

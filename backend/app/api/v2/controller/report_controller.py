@@ -46,7 +46,10 @@ def generate_report(
     # 查询该项目、该业态、该月份的全部审核结果（audit_results 已按 service_type 分行存储），
     # 组装为 [{"service_type": st, "results": rd}, ...] 交给报告生成器按服务类型分章渲染，
     # 使每类服务的项目、人员配置、工时、费用与审核结论在独立章节中完全分离、互不混淆。
-    audit_results = audit_result_dao.list_audit_results(project_name, audit_month, business_type)
+    # service_type 非空时只生成该服务类型的报告（与前端 PDF 报告页的子分类切换一致）
+    audit_results = audit_result_dao.list_audit_results(
+        project_name, audit_month, business_type, service_type
+    )
     audit_input = []
     for ar in audit_results:
         raw = ar.results_json

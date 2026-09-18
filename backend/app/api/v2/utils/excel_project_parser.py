@@ -51,6 +51,28 @@ def _map_schedule_position_to_contract(schedule_pos: str) -> str:
     return cleaned
 
 
+def _extract_slot_hours_from_name(raw_position: str) -> float:
+    r"""从排班表岗位名中提取该班次的日时长。
+
+    排班表常把全天岗位拆成早/晚两行，岗位名里带时长后缀：
+      "B座1楼-9楼公区女客卫6.75h7:45-15:00" → 6.75（早班）
+      "B座1楼-9楼公区女客卫6.25h15:00-21:45" → 6.25（晚班）
+      "A座1楼13h"                             → 13.0（全天，不拆班次时）
+      "保洁主管8.5h"                          → 8.5
+      "L型夜班8h"                             → 8.0
+
+    提取第一个出现的 "Xh" / "X.Xh" 模式；无匹配返回 0.0
+    （扣款逻辑会在 0 时回退到合同编制表的全天 daily_hours）。
+
+    注意：排班表岗位名的时长后缀常紧跟上班时间，例如
+      "B座1楼-9楼公区女客卫6.75h7:45-15:00" → 6.75（h 后紧跟起始时间数字 7）
+    因此不能用 "(?!\d)" 禁止 h 后跟数字，否则会漏提取。这里取最左的 "数字+h"
+    即视为该班次时长；时间里的数字（如 7:45）因后面没有紧邻的 h，不会被误取。
+    """
+    m = re.search(r"(\d+\.?\d*)\s*h", raw_position, re.IGNORECASE)
+    return float(m.group(1)) if m else 0.0
+
+
 def _infer_month_from_filename(filename: str) -> str:
     """从文件名推断审核月份，格式 YYYY-MM。"""
     match = re.search(r"(20\d{2})[-年._]?(\d{1,2})", str(filename))
@@ -64,19 +86,27 @@ def _infer_month_from_filename(filename: str) -> str:
     return ""
 
 
-def parse_project_excel(path: str | Path, audit_month: str = "") -> list[PositionInfo]:
+def parse_project_excel(
+    path: str | Path,
+    audit_month: str = "",
+    service_type: str = "",
+    force_project_name: str = "",
+) -> list[PositionInfo]:
     """解析项目考勤表，返回 PositionInfo 列表（一个业态一个）。
 
     同时把第 3 个 Sheet（排班表）解析为排班槽位，挂到对应岗位的 slots 上，
     形成「岗位表 : 排班子表」的主从结构，供岗位履约审核使用。
 
     Args:
-        path:        项目考勤表路径。
-        audit_month: 审核月份 'YYYY-MM'（优先于从文件名推断；真实流程里由项目选择决定）。
+        path:         项目考勤表路径。
+        audit_month:  审核月份 'YYYY-MM'（优先于从文件名推断；真实流程里由 AI 审核页选择决定）。
+        service_type: 服务类型（保安/保洁），原样写入 PositionInfo.service_type。
+        force_project_name: 项目名称，一律取自登录用户（调用方传入），不在本函数内从 Excel 读取。
     """
     wb = load_workbook(str(path), data_only=True)
     sheet_names = wb.sheetnames
     audit_month = audit_month or _infer_month_from_filename(str(path))
+    service_type = service_type or ""
 
     # --- 1. 解析基础信息 ---
     info_sheet = _find_sheet(sheet_names, wb, ["基础信息", "项目基础信息", "Sheet1"])
@@ -95,8 +125,9 @@ def parse_project_excel(path: str | Path, audit_month: str = "") -> list[Positio
         positions = [p for bt, p in contract_positions if bt == biz_type]
 
         position_info = PositionInfo(
-            project_name=info["project_name"],
+            project_name=force_project_name,
             business_type=biz_type,
+            service_type=service_type,
             supplier=info["supplier"],
             contracted_count=info["contracted_count"],
             actual_count=sum(p.actual_count for p in positions),
@@ -176,6 +207,7 @@ def parse_schedule_sheet(wb, audit_month: str) -> list[tuple[ScheduleSlot, str, 
         slot = ScheduleSlot(
             area=area,
             slot_index=slot_counter[counter_key],
+            slot_hours=_extract_slot_hours_from_name(raw_position),
             daily=daily,
         )
         result.append((slot, position, raw_position, current_business))
@@ -353,33 +385,96 @@ def _safe_str(value) -> str:
     return str(value).strip()
 
 
+def _detect_base_columns(headers: list[str]) -> dict[str, int]:
+    """从基础信息表头自动检测列索引（兼容保洁/保安两套模板的列差异）。
+
+    背景：基础信息的列位置**不能硬编码**。保洁模板为 10 列
+    （项目名称/业态/建筑面积/可收费面积/保洁外包公司/合同开始/合同结束/
+     合同约定岗位数/实际在岗岗位数/合同金额），
+    保安模板只有 8 列（不含「建筑面积」「可收费面积」），
+    同一字段在两套模板里的下标不同（外包公司 4 vs 2、约定岗位数 7 vs 5）。
+    若按保洁模板的固定下标去读保安表，轻则字段错位（把合同开始当外包公司、
+    把实际岗数当约定岗数），重则直接抛 IndexError: tuple index out of range。
+
+    优先精确关键词，其次模糊关键词（与 _detect_contract_columns 保持同一思路）。
+    """
+    col_map: dict[str, int] = {}
+    for i, h in enumerate(headers):
+        h_lower = _safe_str(h).replace(" ", "").replace("（", "(").replace("）", ")")
+        if not h_lower:
+            continue
+        if "项目名称" in h_lower:
+            col_map.setdefault("project_name", i)
+        elif "业态" in h_lower or "业务类型" in h_lower:
+            col_map.setdefault("business_type", i)
+        elif "外包" in h_lower or "服务公司" in h_lower or "供应商" in h_lower:
+            col_map.setdefault("supplier", i)
+        elif "约定" in h_lower and "岗位" in h_lower:
+            col_map.setdefault("contracted_count", i)
+        elif "实际" in h_lower and "岗位" in h_lower:
+            col_map.setdefault("actual_count", i)
+        elif "实际" in h_lower and "人数" in h_lower:
+            col_map.setdefault("actual_count", i)
+    return col_map
+
+
+def _row_get(row, idx: int | None, default: Any = None) -> Any:
+    """按下标安全取值：idx 为 None 或越界时返回 default（不抛 IndexError）。"""
+    if idx is None or idx < 0 or idx >= len(row):
+        return default
+    return row[idx]
+
+
 def _parse_base_info(ws) -> list[dict]:
     """解析基础信息 Sheet。
-    列: 项目名称, 业态, 建筑面积, 可收费面积, 保洁外包公司,
+
+    列（保洁模板）: 项目名称, 业态, 建筑面积, 可收费面积, 保洁外包公司,
         合同开始, 合同结束, 合同约定岗位数, 实际在岗岗位数, 合同金额
+    列（保安模板）: 项目名称, 业态, 保安外包公司,
+        合同开始, 合同结束, 合同约定岗位数, 实际在岗岗位数, 合同金额(月)
+
+    两套模板列数不同，因此一律按表头自动识别列位置；
+    仅当表头无法识别时才回退到旧版固定下标，且越界返回默认值（不再崩溃）。
     """
-    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    all_rows = list(ws.iter_rows(values_only=True))
+    if not all_rows:
+        return []
+    col_map = _detect_base_columns([_safe_str(v) for v in all_rows[0]])
+
+    if "contracted_count" not in col_map or "actual_count" not in col_map:
+        # 表头无法识别（非常规模板）：回退旧版保洁 10 列固定布局
+        print(
+            "[解析警告] 基础信息表未能识别「合同约定岗位数/实际在岗岗位数」列，"
+            "回退按旧版固定列解析；若结果异常请检查表头命名。"
+        )
+    idx_project = col_map.get("project_name", 0)
+    idx_biz = col_map.get("business_type", 1)
+    idx_supplier = col_map.get("supplier", 4)
+    idx_contracted = col_map.get("contracted_count", 7)
+    idx_actual = col_map.get("actual_count", 8)
+
+    rows = all_rows[1:]
     result = []
     last_supplier = ""
     for row in rows:
-        if not row[0] or not _safe_str(row[0]):
+        # 仅用首列判断是否有效数据行；项目名称一律由调用方（登录用户）决定，
+        # 不再从 Excel 基础信息表读取，避免「泰州金鹰天地投资管理有限公司」等全称
+        # 与登录用户项目名（如「泰州金鹰天地」）不一致导致与 contract/BI 对不上。
+        first_cell = _safe_str(_row_get(row, idx_project, ""))
+        if not first_cell:
             continue
-        contracted = _safe_float(row[7])
-        actual = _safe_float(row[8])
-        business_type = _safe_str(row[1])
+        contracted = _safe_float(_row_get(row, idx_contracted, 0))
+        actual = _safe_float(_row_get(row, idx_actual, 0))
+        business_type = _safe_str(_row_get(row, idx_biz, ""))
         if not business_type or (contracted <= 0 and actual <= 0):
             continue
-        project_name = _safe_str(row[0]).replace("项目", "")
-        if len(project_name) > 100:
-            continue
-        raw_supplier = row[4]
+        raw_supplier = _row_get(row, idx_supplier, "")
         supplier = _extract_supplier_name(raw_supplier, row)
         if not supplier:
             supplier = last_supplier
         if supplier:
             last_supplier = supplier
         result.append({
-            "project_name": project_name,
             "business_type": business_type,
             "supplier": supplier,
             "contracted_count": int(contracted),

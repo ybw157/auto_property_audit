@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { API_BASE_URL, request, getToken } from '../services/api'
 import type { AuditContext } from '../types'
+import { useServiceTypes } from '../hooks/useServiceTypes'
+import { ServiceTypeTabs } from './ServiceTypeTabs'
 
 type Report = {
   id: number
@@ -15,6 +17,10 @@ export function ReportDownloads({ auditContext }: { auditContext: AuditContext |
   const [loadingAttendance, setLoadingAttendance] = useState(false)
   const [loadingDeduction, setLoadingDeduction] = useState(false) // 控制"生成扣款报告"= 汇总报告
 
+  // 与审核结果页 / 异常确认页共用同一套服务类型子分类，保证三处取值与交互一致
+  const { options: serviceTypeOptions, active: activeServiceType, setActive: setActiveServiceType } =
+    useServiceTypes(auditContext)
+  const effectiveServiceType = activeServiceType || auditContext?.service_type || ''
 
   async function loadReports() {
     if (!auditContext) return
@@ -35,7 +41,7 @@ export function ReportDownloads({ auditContext }: { auditContext: AuditContext |
     setMessage('')
     try {
       await request(
-        `/api/v2/reports/generate?project_name=${encodeURIComponent(auditContext.project_name)}&business_type=${encodeURIComponent(auditContext.business_type)}&audit_month=${encodeURIComponent(auditContext.audit_month)}&report_type=${reportType}`,
+        `/api/v2/reports/generate?project_name=${encodeURIComponent(auditContext.project_name)}&business_type=${encodeURIComponent(auditContext.business_type)}&audit_month=${encodeURIComponent(auditContext.audit_month)}&service_type=${encodeURIComponent(effectiveServiceType)}&report_type=${reportType}`,
         { method: 'POST' }
       )
       await loadReports()
@@ -59,6 +65,7 @@ export function ReportDownloads({ auditContext }: { auditContext: AuditContext |
           <p className="mt-2 text-sm text-slate-500">
             审核完成后生成考勤明细 PDF；确认异常后生成 AI 审核汇总与扣款报告。
           </p>
+          <ServiceTypeTabs options={serviceTypeOptions} value={activeServiceType} onChange={setActiveServiceType} />
         </div>
         <div className="flex gap-3">
           <button

@@ -20,7 +20,11 @@ def _extract_month_from_filename(filename: str) -> str:
 
 
 def _extract_month_from_excel(file_path: Path) -> str:
-    """从 Excel Sheet 名或内容中提取月份（文件名提取失败时的回退方案）。"""
+    """从 Excel Sheet 名或内容中提取月份（文件名提取失败时的回退方案）。
+
+    仅当调用方未显式传入审核月时才使用。注意 Sheet 名里的「X月」不含年份，
+    此回退会补上当前年份，跨年上传时会得到错误月份，因此不能作为月份来源。
+    """
     try:
         from openpyxl import load_workbook
         wb = load_workbook(str(file_path), data_only=True, read_only=True)
@@ -41,12 +45,37 @@ def _extract_month_from_excel(file_path: Path) -> str:
     return ""
 
 
-def upload_and_parse_excel(file: UploadFile, force_project_name: str = "") -> dict:
+def normalize_audit_month(value: str) -> str:
+    """把审核月统一成 YYYYMM（兼容 '202608' / '2026-08' / '2026年8月'）。"""
+    raw = str(value or "").strip()
+    m = re.search(r"(20\d{2})[-年._/\s]?(\d{1,2})", raw)
+    if m:
+        return f"{int(m.group(1)):04d}{int(m.group(2)):02d}"
+    m = re.search(r"^(\d{1,2})$", raw)
+    if m:
+        from datetime import datetime
+        return f"{datetime.now().year}{int(m.group(1)):02d}"
+    return ""
+
+
+def upload_and_parse_excel(
+    file: UploadFile,
+    force_project_name: str = "",
+    audit_month: str = "",
+    service_type: str = "",
+) -> dict:
     """
     上传并解析项目岗位 Excel 表格，将结果存入数据库
 
     :param file: Excel 文件
     :param force_project_name: 强制使用的项目名（来自登录用户信息），非空时覆盖 Excel 解析出的项目名
+    :param audit_month: 审核月，来自 AI 审核页「选择审核月」控件（YYYYMM / YYYY-MM 均可）。
+                        为唯一月份来源：同时用于库表定位与表内排班日期，
+                        不再从文件名或 Sheet 名推断（Sheet 名缺月份时会导致月份为空、
+                        与审核时读取的月份对不上，岗位因此无法被识别）。
+                        未传入时才回退到文件名 / Sheet 名推断（兼容旧调用方）。
+    :param service_type: 服务类型（保安/保洁），来自 AI 审核页「选择服务类型」控件。
+                         不使用任何默认值或硬编码，原样写入 PositionInfo.service_type。
     :return: 解析结果
     """
     filename = file.filename or ""
@@ -57,8 +86,10 @@ def upload_and_parse_excel(file: UploadFile, force_project_name: str = "") -> di
     file_path = upload_dir / filename
     file_path.write_bytes(file.file.read())
 
-    # 先提取月份（YYYYMM），文件名失败时从 Excel Sheet 名提取
-    audit_month = _extract_month_from_filename(filename)
+    # 月份来源统一为调用方传入的审核月；仅在未传入时才回退推断
+    audit_month = normalize_audit_month(audit_month)
+    if not audit_month:
+        audit_month = _extract_month_from_filename(filename)
     if not audit_month:
         audit_month = _extract_month_from_excel(file_path)
     bi_month = audit_month
@@ -68,24 +99,28 @@ def upload_and_parse_excel(file: UploadFile, force_project_name: str = "") -> di
 
     # 解析 Excel
     try:
-        position_infos = parse_project_excel(file_path, audit_month=audit_month_iso)
+        position_infos = parse_project_excel(
+            file_path,
+            audit_month=audit_month_iso,
+            service_type=service_type,
+            force_project_name=force_project_name,
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Excel 解析失败：{str(e)}")
 
-    # 赋值月份并保存到数据库
+    # 赋值月份、服务类型并保存到数据库
     for info in position_infos:
-        # 如果指定了 force_project_name，直接使用；否则使用 Excel 解析出的项目名（去掉"项目"二字）
-        if force_project_name:
-            info.project_name = force_project_name
-        else:
-            info.project_name = info.project_name.replace("项目", "")
+        # 项目名称一律取自登录用户（force_project_name），不使用 Excel 内解析出的项目名
+        info.project_name = force_project_name
         info.audit_month = audit_month
+        info.service_type = service_type or ""
         position_dao.save_position_info(info)
 
     return {
         "positions": [info.to_dict() for info in position_infos],
         "audit_month": audit_month,
         "bi_month": bi_month,
+        "service_type": service_type or "",
     }
 
 

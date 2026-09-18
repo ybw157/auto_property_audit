@@ -17,6 +17,7 @@ class ScheduleSlot:
     """
     area: str = ""                 # 固定区域/工作区域，同名岗位靠此区分不同槽位
     slot_index: int = 0            # 同一岗位内的序号，从 1 开始
+    slot_hours: float = 0.0       # 该班次的实际日时长（如早班6.75/晚班6.25），取自排班表岗位名；0 时回退合同表全天值
     daily: dict = field(           # {日期: [单元格字典]}；单元格由 classify_schedule_cell 产出
         default_factory=dict,
     )
@@ -74,11 +75,15 @@ class Position:
 
 class PositionInfo(Base):
     __tablename__ = "position_infos"
-    __table_args__ = (UniqueConstraint("project_name", "business_type", "audit_month"),)
+    # 同一 (项目, 业态, 月份) 下保安与保洁各存一份排班，故定位键必须包含 service_type
+    __table_args__ = (
+        UniqueConstraint("project_name", "business_type", "audit_month", "service_type"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True) #主键
     project_name: Mapped[str] = mapped_column(String(255), nullable=False) #项目名称
     business_type: Mapped[str] = mapped_column(String(50), nullable=False) #业态
+    service_type: Mapped[str] = mapped_column(String(50), nullable=False, default="", server_default="") #服务类型（保安/保洁），取自 AI 审核页选择
     supplier: Mapped[str] = mapped_column(String(255), nullable=False) #供应商
     audit_month: Mapped[str] = mapped_column(String(10), default="") #审核月份
     contracted_count: Mapped[int] = mapped_column(Integer, default=0) #合同人数

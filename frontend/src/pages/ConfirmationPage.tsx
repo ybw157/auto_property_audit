@@ -105,22 +105,26 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
     for (const issue of d.mid_clock_issues || []) {
       const dateStr = issue.date || ''
       const windowTag = issue.window || ''
-      const confKey = windowTag
+      const mcKey = windowTag
+        ? `missing_clock|${d.employee_name}|${dateStr}|${windowTag}`
+        : `missing_clock|${d.employee_name}|${dateStr}`
+      const legacyKey = windowTag
         ? `mid_clock|${d.employee_name}|${dateStr}|${windowTag}`
         : `mid_clock|${d.employee_name}|${dateStr}`
+      const confKey = mcKey in confs ? mcKey : legacyKey
       const conf = confs[confKey]
       const missing = issue.missing || 0
       const meta = midByKey.get(`${dateStr}|${windowTag}`)
       const shift = meta ? `${meta.shift_start || ''}-${meta.shift_end || ''}` : ''
       const clocks = meta ? (meta.clock_times || []).join('\n') : ''
       records.push({
-        key: confKey,
+        key: mcKey,
         employee_name: d.employee_name,
         work_date: dateStr,
         window: windowTag,
         position: meta?.position || issue.position || d.position,
-        exception_type: 'mid_clock',
-        exception_label: '中间卡缺失',
+        exception_type: 'missing_clock',
+        exception_label: '漏打卡',
         amount: missing * 50,
         detail: `${windowTag} 缺${missing}次，扣款${missing * 50}元`,
         shift_time: shift,

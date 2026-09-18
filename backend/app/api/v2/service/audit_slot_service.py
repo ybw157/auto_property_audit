@@ -164,6 +164,7 @@ def _audit_one_slot_day(
             "position": pos_name,
             "slot_index": slot.slot_index,
             "area": slot.area,
+            "slot_hours": slot.slot_hours,
             "shift_start": shift_start,
             "shift_end": shift_end,
             "is_cross_midnight": is_cross,
@@ -342,6 +343,7 @@ def _build_summary(
         item = grouped.setdefault(gkey, {
             "position": d["position"],
             "slot_index": d["slot_index"],
+            "slot_hours": d.get("slot_hours", 0.0),  # 该班次实际日时长（早/晚/全天），取自排班表岗位名
             "required_days": 0,
             "normal_days": 0,
             "shortage_days": 0,
@@ -366,10 +368,14 @@ def _build_summary(
 
     summary = []
     for (pos, slot_idx), item in grouped.items():
-        rate, hours = rate_map.get(normalize_position_name(pos), (0.0, 0.0))
-        per_day = round(rate * hours, 2) if rate and hours else 0.0
+        rate, contract_hours = rate_map.get(normalize_position_name(pos), (0.0, 0.0))
+        # 班次级时长优先：排班表把全天岗拆成早/晚两行时，缺岗应按「该班次实际时长」计费，
+        # 而非合同编制表的全天 daily_hours（否则早班缺勤会按全天 13h 扣，即原 bug）。
+        slot_hours = item.get("slot_hours", 0.0)
+        effective_hours = slot_hours if slot_hours > 0 else contract_hours
+        per_day = round(rate * effective_hours, 2) if rate and effective_hours else 0.0
         item["hourly_rate"] = rate
-        item["daily_hours"] = hours
+        item["daily_hours"] = effective_hours
         item["shortage_amount"] = round(item["shortage_days"] * per_day * absence_coefficient, 2) if per_day else 0.0
         item["shortage_rate"] = (
             round(item["shortage_days"] / item["required_days"] * 100, 1)

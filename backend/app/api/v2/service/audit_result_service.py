@@ -302,7 +302,11 @@ def start_audit(
 
     # 1) 加载岗位信息（含排班槽位）
     print(f"\n[步骤1] 加载岗位信息...")
-    position_info = position_dao.get_position_info(project_name, business_type, audit_month)
+    # service_type 必须参与岗位定位：同一 (项目, 业态, 月份) 下保安与保洁各存一份排班，
+    # 否则选「保安」审核会加载保洁的排班，审核结果内容全是保洁岗人员。
+    position_info = position_dao.get_position_info(
+        project_name, business_type, audit_month, service_type or ""
+    )
     if position_info is None or not position_info.positions:
         # 区分三种失败原因，避免"数据已上传、只是业态选错"时误导用户反复重新上传
         if position_info is not None:
@@ -606,18 +610,24 @@ def confirm_exceptions(
                 }
                 updated_count += 1
 
+        # 中间卡缺失：并入「漏打卡」确认键（与审核汇总/报告口径一致），
+        # 同时保留 mid_clock| 键以兼容历史已确认数据。
         for issue in detail.get("mid_clock_issues", []):
             date_str = issue.get("date", "")
             window = issue.get("window", "")
-            key = f"mid_clock|{emp_name}|{date_str}|{window}" if window else f"mid_clock|{emp_name}|{date_str}"
-            if key in confirm_map:
-                confirmations[key] = {
-                    "confirmed": confirm_map[key]["confirmed"],
-                    "note": confirm_map[key]["note"],
-                    "free_deduction": confirm_map[key].get("free_deduction", False),
+            mc_key = f"missing_clock|{emp_name}|{date_str}|{window}" if window else f"missing_clock|{emp_name}|{date_str}"
+            legacy_key = f"mid_clock|{emp_name}|{date_str}|{window}" if window else f"mid_clock|{emp_name}|{date_str}"
+            src = confirm_map.get(mc_key) or confirm_map.get(legacy_key)
+            if src is not None:
+                conf_entry = {
+                    "confirmed": src["confirmed"],
+                    "note": src["note"],
+                    "free_deduction": src.get("free_deduction", False),
                     "confirmed_by": confirmed_by,
                     "confirmed_at": now_text(),
                 }
+                confirmations[mc_key] = conf_entry
+                confirmations[legacy_key] = conf_entry
                 updated_count += 1
 
         for late in detail.get("late_details", []):
@@ -708,6 +718,22 @@ def finalize_audit(
             else:
                 unconfirmed_missing_count += 1
 
+        # 中间卡缺失并入漏打卡（与审核汇总口径一致：漏打卡含中间卡缺失），
+        # 与上面的 missing_clock_dates 统一计算免扣与扣款金额。
+        for issue in detail.get("mid_clock_issues", []):
+            date_str = issue.get("date", "")
+            window = issue.get("window", "")
+            mc_key = f"missing_clock|{emp_name}|{date_str}|{window}" if window else f"missing_clock|{emp_name}|{date_str}"
+            legacy_key = f"mid_clock|{emp_name}|{date_str}|{window}" if window else f"mid_clock|{emp_name}|{date_str}"
+            conf = confirmations.get(mc_key) or confirmations.get(legacy_key) or {}
+            missed = issue.get("missing", 0) or 0
+            if conf.get("free_deduction", False):
+                free_missing_count += missed
+            elif conf.get("confirmed", False):
+                confirmed_missing_count += missed
+            else:
+                unconfirmed_missing_count += missed
+
         if missing_count > 0 and missing_amount > 0:
             per_amount = missing_amount / missing_count
         else:
@@ -732,15 +758,6 @@ def finalize_audit(
             if conf.get("confirmed", False) and not conf.get("free_deduction", False):
                 confirmed_early_total += early.get("amount", 0) or 0
 
-        confirmed_mid_total = 0
-        for issue in detail.get("mid_clock_issues", []):
-            date_str = issue.get("date", "")
-            window = issue.get("window", "")
-            key = f"mid_clock|{emp_name}|{date_str}|{window}" if window else f"mid_clock|{emp_name}|{date_str}"
-            conf = confirmations.get(key, {})
-            if conf.get("confirmed", False) and not conf.get("free_deduction", False):
-                confirmed_mid_total += (issue.get("missing", 0) or 0) * 50
-
         confirmed_absence_total = 0
         daily_rate = detail.get("absence_daily_rate", 0) or 0
         # 缺岗扣款倍数：detail 落库的已是 float（来自 audit_attendance_service.run_attendance_s04_audit），
@@ -760,14 +777,13 @@ def finalize_audit(
         detail["final_missing_clock_amount"] = final_missing_amount
         detail["final_late_amount"] = confirmed_late_total
         detail["final_early_leave_amount"] = confirmed_early_total
-        detail["final_mid_clock_amount"] = confirmed_mid_total
+        detail["final_mid_clock_amount"] = 0  # 中间卡缺失已并入 final_missing_clock_*
         detail["final_absence_amount"] = confirmed_absence_total
         detail["free_missing_count"] = free_missing_count
         detail["final_total_deduction"] = round(
             final_missing_amount
             + confirmed_late_total
             + confirmed_early_total
-            + confirmed_mid_total
             + confirmed_absence_total,
             2,
         )
@@ -799,8 +815,8 @@ def finalize_audit(
         for issue in detail.get("mid_clock_issues", []):
             _w = issue.get("window", "")
             keys.append(
-                f"mid_clock|{emp_name}|{issue.get('date', '')}|{_w}"
-                if _w else f"mid_clock|{emp_name}|{issue.get('date', '')}"
+                f"missing_clock|{emp_name}|{issue.get('date', '')}|{_w}"
+                if _w else f"missing_clock|{emp_name}|{issue.get('date', '')}"
             )
         for late in detail.get("late_details", []):
             keys.append(f"late|{emp_name}|{late.get('date', '')}")

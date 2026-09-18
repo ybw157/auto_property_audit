@@ -7,19 +7,30 @@ from app.api.v2.core.database import get_db
 from app.api.v2.models.position_models import PositionInfo, Position
 
 
+def _pos_key_q(q, project_name: str, business_type: str, audit_month: str, service_type: str = ""):
+    """岗位记录的定位条件：(项目, 业态, 月份, 服务类型)。
+
+    service_type 必须参与定位，否则同一业态+月份下后上传的保安会覆盖先上传的保洁。
+    """
+    return q.filter(
+        PositionInfo.project_name == project_name,
+        PositionInfo.business_type == business_type,
+        PositionInfo.audit_month == audit_month,
+        PositionInfo.service_type == service_type,
+    )
+
+
 def save_position_info(info: PositionInfo) -> int:
     positions_data = [p.to_dict() for p in info.positions]
     db: Session = next(get_db())
     try:
-        existing = (
-            db.query(PositionInfo)
-            .filter(
-                PositionInfo.project_name == info.project_name,
-                PositionInfo.business_type == info.business_type,
-                PositionInfo.audit_month == info.audit_month,
-            )
-            .first()
-        )
+        existing = _pos_key_q(
+            db.query(PositionInfo),
+            info.project_name,
+            info.business_type,
+            info.audit_month,
+            getattr(info, "service_type", "") or "",
+        ).first()
         if existing:
             existing.supplier = info.supplier
             existing.positions_json = positions_data
@@ -42,18 +53,22 @@ def get_position_info(
     project_name: str,
     business_type: str,
     audit_month: str,
+    service_type: str = "",
 ) -> PositionInfo | None:
+    """取岗位数据。
+
+    service_type 非空时先取该服务类型自己的排班；查不到则回退到 service_type 为空的
+    历史记录，兼容改造前上传的（不区分服务类型的）排班数据。
+    """
     db: Session = next(get_db())
     try:
-        info = (
-            db.query(PositionInfo)
-            .filter(
-                PositionInfo.project_name == project_name,
-                PositionInfo.business_type == business_type,
-                PositionInfo.audit_month == audit_month,
-            )
-            .first()
-        )
+        info = _pos_key_q(
+            db.query(PositionInfo), project_name, business_type, audit_month, service_type or ""
+        ).first()
+        if info is None and service_type:
+            info = _pos_key_q(
+                db.query(PositionInfo), project_name, business_type, audit_month, ""
+            ).first()
         if info and info.positions_json:
             positions_data: list = info.positions_json  # type: ignore[assignment]
             info.positions = [
