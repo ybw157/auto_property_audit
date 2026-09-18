@@ -227,6 +227,14 @@ export function AuditResults() {
 
   useEffect(() => {
     if (!auditContext) return
+    // 目标服务类型尚未审核：清空数据并交由页面层提示，无需请求详情
+    const opt = serviceTypeOptions.find((o) => o.value === effectiveServiceType)
+    if (opt && !opt.hasResult) {
+      setDetailData(null)
+      setRows([])
+      setDashboard({ attendanceDetails: [], positionFulfillment: [], exceptions: [], attendanceDeductions: [], deductions: [], s04Summary: {}, deductionDetails: [], crossProjectReview: [], crossProjectResolved: [] })
+      return
+    }
     const params = new URLSearchParams({
       project_name: projectName,
       business_type: businessType,
@@ -256,7 +264,7 @@ export function AuditResults() {
         setRows([])
         setDashboard({ attendanceDetails: [], positionFulfillment: [], exceptions: [], attendanceDeductions: [], deductions: [], s04Summary: {}, deductionDetails: [], crossProjectReview: [], crossProjectResolved: [] })
       })
-  }, [auditContext, effectiveServiceType])
+  }, [auditContext, effectiveServiceType, serviceTypeOptions])
 
   useEffect(() => {
     if (!auditContext || !detailData) return
@@ -293,8 +301,29 @@ export function AuditResults() {
     }
   }
 
+  const activeOption = serviceTypeOptions.find((o) => o.value === activeServiceType)
+  const isServiceTypeUnaudited = activeOption ? !activeOption.hasResult : false
+
   if (loading) return <div className="card p-8 text-center text-sm text-slate-500">加载中…</div>
   if (!auditContext) return <div className="card p-8 text-center text-sm text-slate-500">请先完成一次审核</div>
+  if (isServiceTypeUnaudited) {
+    return (
+      <div className="space-y-5">
+        <div className="card p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">审核确认</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                {projectName} {auditMonth} {businessType ? `· ${businessType}` : ''}{effectiveServiceType ? ` · ${effectiveServiceType}` : ''}
+              </p>
+            </div>
+          </div>
+          <ServiceTypeTabs options={serviceTypeOptions} value={activeServiceType} onChange={setActiveServiceType} />
+        </div>
+        <div className="card p-8 text-center text-slate-500">该服务类型的审核尚未完成，暂无相关数据可查看</div>
+      </div>
+    )
+  }
 
   const isLocked = detailData ? Boolean((detailData as Record<string, unknown>).locked) : false
 

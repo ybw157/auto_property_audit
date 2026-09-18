@@ -64,7 +64,7 @@ def confirm_audit_endpoint(
     audit_month: str,
     service_type: str = "",
 ):
-    """确认审核结果（只锁定指定服务类型那一条）。"""
+    """确认审核结果（记录确认人/时间，不再上锁）。"""
     current = get_current_user(request)
     project_name = resolve_project_name(request, project_name)
     data = confirm_audit(project_name, business_type, audit_month, current["username"], service_type)
@@ -115,7 +115,7 @@ def finalize_audit_endpoint(
     audit_month: str = Body(..., description="审核月份"),
     service_type: str = Body("", description="服务类型（保安/保洁）"),
 ):
-    """确认最终版：计算最终扣款并锁定审核结果（只锁定指定服务类型那一条）。"""
+    """确认最终版：计算最终扣款并标记审核结果（不再锁定）。"""
     current = get_current_user(request)
     data = finalize_audit(
         project_name=resolve_project_name(request, project_name),

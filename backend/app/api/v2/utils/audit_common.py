@@ -397,18 +397,27 @@ def strip_position_time_suffix(text: Any) -> str:
 
 
 # 岗位名中的「班次/时段标签」：（白）（晚）（夜）（早）（中）/（白班）（晚班）...
+# 也覆盖 (A)/(B)/(甲)/(乙) 等字母代号，以及中英文括号混用、空格差异等格式变体。
 # 注意：strip_position_time_suffix 会把括号内容整体删掉，连（白）/（晚）一起删。
 # 但白班与晚班是两个不同的编制岗位（人员、费率、排班都不同），聚合时必须保留标签，
 # 否则同名多行岗位在白/晚槽位之间轮询分配时会串岗（晚班缺岗被记到白班头上）。
 _POSITION_SHIFT_TAG_RE = re.compile(
-    r"[（(]\s*(白班|晚班|夜班|早班|中班|白|晚|夜|早|中)\s*[)）]"
+    r"[（(]\s*"
+    r"(白班|晚班|夜班|早班|中班|白|晚|夜|早|中"  # 中文班次名
+    r"|A|B|C|D|甲|乙|丙|丁"                        # 字母/天干代号
+    r"|白|夜|早)"                                   # 单字别名（冗余但显式）
+    r"\s*[)）]"
 )
 
 
 def extract_position_shift_tag(text: Any) -> str:
-    """提取岗位名中的班次标签并归一化为单字（白/晚/夜/早/中）。
+    """提取岗位名中的班次标签。
 
-    例："东门门岗（晚）" → "晚"；"南门车岗(白班)" → "白"；"停车场" → ""。
+    中文班次名归一化为单字（白/晚/夜/早/中）；
+    字母/天干代号（A/B/C/D/甲/乙/丙/丁）保持原值返回，不做语义假设。
+
+    例："东门门岗（晚）" → "晚"；"南门车岗(白班)" → "白"；
+        "消控员 (A)" → "A"；"消控员 (B)" → "B"；"停车场" → ""。
     """
     raw = str(text or "").strip()
     if not raw:
@@ -417,7 +426,17 @@ def extract_position_shift_tag(text: Any) -> str:
     if not match:
         return ""
     tag = match.group(1)
-    return tag[0] if tag else ""
+    if not tag:
+        return ""
+    # 中文班次名取首字归一化
+    _CN_TAGS = {"白班": "白", "晚班": "晚", "夜班": "夜", "早班": "早", "中班": "中"}
+    if tag in _CN_TAGS:
+        return _CN_TAGS[tag]
+    # 单字中文班次（白/晚/夜/早/中）直接返回
+    if tag in ("白", "晚", "夜", "早", "中"):
+        return tag
+    # 字母/天干代号原样返回
+    return tag
 
 
 def position_name_with_shift_tag(text: Any) -> str:
@@ -429,6 +448,38 @@ def position_name_with_shift_tag(text: Any) -> str:
     base = strip_position_time_suffix(text)
     tag = extract_position_shift_tag(text)
     return f"{base}({tag})" if tag else base
+
+
+def normalize_position_name(text: Any) -> str:
+    """将岗位名规范化为可精确匹配的形式。
+
+    处理以下差异（这些差异不影响语义但会导致字符串 !=）：
+    - 全角括号 → 半角括号
+    - 连续空格 → 无空格
+    - 括号内侧空格 → 去除
+    - 全角空格 → 半角空格 → 去除
+
+    例："消控员 (A)" → "消控员(A)"
+        "内场安全员(B)" → "内场安全员(B)"
+        "商场巡逻岗(白班）" → "商场巡逻岗(白班)"
+
+    注意：此函数保留原始岗位名的全部信息（含括号、标签），
+    不像 strip_position_time_suffix 那样删掉括号内容。
+    用于全名精确匹配；聚合时仍用 strip 后的名称。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+    # 全角括号 → 半角
+    result = raw.replace("（", "(").replace("）", ")")
+    # 全角空格 → 半角
+    result = result.replace("\u3000", " ")
+    # 括号内侧空格去除
+    result = re.sub(r"\(\s+", "(", result)
+    result = re.sub(r"\s+\)", ")", result)
+    # 连续空格 → 无空格
+    result = re.sub(r"\s+", "", result)
+    return result
 
 
 def parse_mid_clock_time(mid_clock_time: str) -> list[tuple[str, str, int]]:

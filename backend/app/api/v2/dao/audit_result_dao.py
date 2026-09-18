@@ -31,7 +31,6 @@ def save_audit_result(result: AuditResult) -> int:
             existing.ai_analysis = result.ai_analysis
             existing.versions_json = result.versions_json
             existing.logs_json = result.logs_json
-            existing.locked = result.locked
             existing.confirmed_by = result.confirmed_by
             existing.confirmed_at = result.confirmed_at
             existing.service_type = result.service_type
@@ -129,35 +128,6 @@ def update_audit_result_status(
             )
         )
         _apply_scope(q, service_type).update(values)
-        db.commit()
-    finally:
-        db.close()
-
-
-def lock_audit_result(
-    project_name: str,
-    business_type: str,
-    audit_month: str,
-    confirmed_by: str,
-    service_type: str = "",
-) -> None:
-    db: Session = next(get_db())
-    try:
-        q = (
-            db.query(AuditResult)
-            .filter(
-                AuditResult.project_name == project_name,
-                AuditResult.business_type == business_type,
-                AuditResult.audit_month == audit_month,
-            )
-        )
-        _apply_scope(q, service_type).update({
-            AuditResult.locked: 1,
-            AuditResult.confirmed_by: confirmed_by,
-            AuditResult.confirmed_at: now_text(),
-            AuditResult.updated_at: now_text(),
-            AuditResult.status: "已确认",
-        })
         db.commit()
     finally:
         db.close()

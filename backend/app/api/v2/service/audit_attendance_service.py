@@ -123,7 +123,11 @@ OVERTIME_THRESHOLD_HOURS = 20.0
 
 def _apply_late_early(entry: dict, late: float, early: float, s04_sub: list,
                       work_date: str, sched: dict, clock_display: list, all_clocks: list):
-    """将迟到/早退结果写入员工记录（单班次与拆分班次共用）。"""
+    """将迟到/早退结果写入员工记录（单班次与拆分班次共用）。
+
+    S04-1（>60分钟）同时写入 missing_clock_dates 和对应明细，
+    确保前端"漏打卡"里能看到迟到/早退原因。
+    """
     if late > 0:
         tier, amount = _classify_late_early(late, s04_sub)
         if tier == "S04-1":
@@ -133,7 +137,15 @@ def _apply_late_early(entry: dict, late: float, early: float, s04_sub: list,
                     "date": work_date, "position": sched["position"],
                     "shift_start": sched["shift_start"], "shift_end": sched["shift_end"],
                     "clock_times": list(clock_display),
+                    "missing_type": "迟到>60min转S04-1",
                 })
+            entry["late_details"].append({
+                "date": work_date, "position": sched["position"],
+                "shift_start": sched["shift_start"], "shift_end": sched["shift_end"],
+                "clock_in": all_clocks[0] if all_clocks else "",
+                "clock_times": list(clock_display),
+                "minutes": late, "tier": tier, "amount": amount,
+            })
         else:
             entry["late_details"].append({
                 "date": work_date, "position": sched["position"],
@@ -151,7 +163,15 @@ def _apply_late_early(entry: dict, late: float, early: float, s04_sub: list,
                     "date": work_date, "position": sched["position"],
                     "shift_start": sched["shift_start"], "shift_end": sched["shift_end"],
                     "clock_times": list(clock_display),
+                    "missing_type": "早退>60min转S04-1",
                 })
+            entry["early_leave_details"].append({
+                "date": work_date, "position": sched["position"],
+                "shift_start": sched["shift_start"], "shift_end": sched["shift_end"],
+                "clock_out": all_clocks[-1] if all_clocks else "",
+                "clock_times": list(clock_display),
+                "minutes": early, "tier": tier, "amount": amount,
+            })
         else:
             entry["early_leave_details"].append({
                 "date": work_date, "position": sched["position"],
@@ -164,14 +184,27 @@ def _apply_late_early(entry: dict, late: float, early: float, s04_sub: list,
 
 def _check_missing_clockout(entry: dict, is_cross: bool, clocks: list, next_clocks: list,
                              all_clocks: list, work_date: str, sched: dict, clock_display: list):
-    """检查漏下班卡（单班次与拆分班次共用）。"""
+    """检查漏打卡（单班次与拆分班次共用）。
+
+    跨夜班次：
+    - 缺下班卡：当日有上班卡但次日无下班卡
+    - 缺上班卡：当日无上班卡（clocks 为空）
+    非跨夜班次：
+    - 只有1次打卡 → 既缺上班也缺下班，记为漏打卡
+    """
     has_missing = False
+    missing_type = ""
     if is_cross:
-        if clocks and not next_clocks:
+        if not clocks:
             has_missing = True
+            missing_type = "缺上班卡"
+        elif clocks and not next_clocks:
+            has_missing = True
+            missing_type = "缺下班卡"
     else:
         if len(all_clocks) == 1:
             has_missing = True
+            missing_type = "缺下班卡"
     if has_missing:
         entry["missing_clock_dates"].add(work_date)
         if not any(r["date"] == work_date for r in entry["missing_clock_records"]):
@@ -179,6 +212,7 @@ def _check_missing_clockout(entry: dict, is_cross: bool, clocks: list, next_cloc
                 "date": work_date, "position": sched["position"],
                 "shift_start": sched["shift_start"], "shift_end": sched["shift_end"],
                 "clock_times": list(clock_display),
+                "missing_type": missing_type,
             })
 
 
@@ -297,11 +331,17 @@ def _calc_late_early_minutes(
     if start_min is None or end_min is None:
         return 0, 0
 
+    # 跨夜缓冲窗口 = 班次时长的 50%
+    _shift_mins = abs(end_min - start_min)
+    if _shift_mins <= 0:
+        _shift_mins += 1440
+    _cross_buf = int(_shift_mins * 0.5)
+
     clock_mins = []
     for t in clock_times:
         m = time_to_minutes(parse_time_value(t))
         if m is not None:
-            if is_cross_midnight and m < start_min and m <= end_min + 120:
+            if is_cross_midnight and m < start_min and m <= end_min + _cross_buf:
                 m += 1440
             clock_mins.append(m)
 
@@ -370,11 +410,17 @@ def _check_mid_clock_compliance(
     if start_min is None or end_min is None:
         return result
 
+    # 跨夜缓冲窗口 = 班次时长的 50%
+    _shift_mins = abs(end_min - start_min)
+    if _shift_mins <= 0:
+        _shift_mins += 1440
+    _cross_buf = int(_shift_mins * 0.5)
+
     clock_mins = []
     for t in clock_times:
         m = time_to_minutes(parse_time_value(t))
         if m is not None:
-            if is_cross_midnight and m < start_min and m <= end_min + 120:
+            if is_cross_midnight and m < start_min and m <= end_min + _cross_buf:
                 m += 1440
             clock_mins.append(m)
 
@@ -505,11 +551,16 @@ def run_attendance_s04_audit(
                     if is_cross:
                         next_dt = _next_date(work_date)
                         next_clocks = list(bi_index.get((name, next_dt), [])) if next_dt else []
+                        # 缓冲窗口 = 班次时长的 50%，确保加班/延迟下班不被误丢
+                        _shift_mins = abs(_e_min - _s_min) if (_s_min is not None and _e_min is not None) else 720
+                        if _shift_mins <= 0:
+                            _shift_mins += 1440  # 跨天班次
+                        _buf = int(_shift_mins * 0.5)
                         if _s_min is not None:
-                            _s_buf = max(0, _s_min - 120)
+                            _s_buf = max(0, _s_min - _buf)
                             clocks = [t for t in clocks if (time_to_minutes(parse_time_value(t)) or -1) >= _s_buf]
                         if _e_min is not None:
-                            _e_buf = _e_min + 120
+                            _e_buf = _e_min + _buf
                             next_clocks = [t for t in next_clocks if (time_to_minutes(parse_time_value(t)) or 9999) <= _e_buf]
                     else:
                         next_dt = ""
@@ -580,12 +631,17 @@ def run_attendance_s04_audit(
             # 跨天班次过滤：只保留属于当前班次的打卡
             _s_min = time_to_minutes(parse_time_value(sched["shift_start"]))
             _e_min = time_to_minutes(parse_time_value(sched["shift_end"]))
+            # 缓冲窗口 = 班次时长的 50%，确保加班/延迟下班不被误丢
+            _shift_mins = abs(_e_min - _s_min) if (_s_min is not None and _e_min is not None) else 720
+            if _shift_mins <= 0:
+                _shift_mins += 1440  # 跨天班次
+            _buf = int(_shift_mins * 0.5)
             if _s_min is not None:
-                _s_buf = max(0, _s_min - 120)
+                _s_buf = max(0, _s_min - _buf)
                 clocks = [t for t in clocks
                           if (time_to_minutes(parse_time_value(t)) or -1) >= _s_buf]
             if _e_min is not None:
-                _e_buf = _e_min + 120
+                _e_buf = _e_min + _buf
                 next_clocks = [t for t in next_clocks
                                if (time_to_minutes(parse_time_value(t)) or 9999) <= _e_buf]
 

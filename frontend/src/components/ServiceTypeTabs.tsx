@@ -11,10 +11,11 @@ interface Props {
  * 服务类型导航：按保安/保洁分类切换查看对应的审核结果。
  *
  * 审核结果页与异常确认页共用，保证两处交互一致。
- * 只有一个可选项时不渲染，避免页面上出现孤零零一个按钮。
+ * 始终渲染（即使只有1项），让用户明确当前查看的是哪个服务类型；
+ * 点击未审核的服务类型时由页面层显示提示。
  */
 export function ServiceTypeTabs({ options, value, onChange, disabled }: Props) {
-  if (!options || options.length <= 1) return null
+  if (!options || options.length < 1) return null
   return (
     <div className="mt-3 inline-flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1">
       {options.map((opt) => {

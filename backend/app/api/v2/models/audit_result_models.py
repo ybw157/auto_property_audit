@@ -28,7 +28,6 @@ class AuditResult(Base):
     ai_analysis: Mapped[str] = mapped_column(String(1000), default="")
     versions_json: Mapped[list] = mapped_column(JSON, default=[])
     logs_json: Mapped[list] = mapped_column(JSON, default=[])
-    locked: Mapped[int] = mapped_column(Integer, default=0)
     confirmed_by: Mapped[str] = mapped_column(String(100), default="")
     confirmed_at: Mapped[str] = mapped_column(String(30), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

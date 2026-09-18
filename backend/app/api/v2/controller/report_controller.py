@@ -42,40 +42,32 @@ def generate_report(
     if report_type not in ("attendance", "summary"):
         raise HTTPException(status_code=400, detail="无效的报告类型")
 
-    audit_result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
-    if not audit_result:
+    # 报告严格按服务类型（保安/保洁）分章：一份 PDF 同时呈现该项目下全部服务类型的独立数据。
+    # 查询该项目、该业态、该月份的全部审核结果（audit_results 已按 service_type 分行存储），
+    # 组装为 [{"service_type": st, "results": rd}, ...] 交给报告生成器按服务类型分章渲染，
+    # 使每类服务的项目、人员配置、工时、费用与审核结论在独立章节中完全分离、互不混淆。
+    audit_results = audit_result_dao.list_audit_results(project_name, audit_month, business_type)
+    audit_input = []
+    for ar in audit_results:
+        raw = ar.results_json
+        if not raw:
+            continue
+        rd = json_loads(raw, {}) if isinstance(raw, str) else raw
+        if rd:
+            audit_input.append({"service_type": ar.service_type or "", "results": rd})
+    if not audit_input:
         raise HTTPException(status_code=404, detail="未找到审核结果")
 
     report_dir = settings.report_dir / project_name
     report_dir.mkdir(parents=True, exist_ok=True)
 
-    # 取启用中的合同（同项目多份时取最近更新的那份），用于报告头部的合同编号/供应商/合同名称
-    matched = contract_dao.get_latest_active_contract(project_name, business_type)
-    if matched is None:
-        all_contracts = contract_dao.get_contracts(project_name, business_type)
-        matched = all_contracts[0] if all_contracts else None
-    contract = None
-    if matched is not None:
-        contract = {
-            "contract_no": getattr(matched, "contract_no", ""),
-            "supplier": getattr(matched, "supplier", ""),
-            "contract_name": getattr(matched, "contract_name", "未匹配"),
-        }
-
-    results_data = json_loads(audit_result.results_json, {})
-
     if report_type == "attendance":
-        bi_records = bi_dao.get_bi_by_project(audit_month, project_name)
-        position_info = position_dao.get_position_info(project_name, business_type, audit_month)
-        if not position_info:
-            raise HTTPException(status_code=400, detail="未找到岗位数据")
-        position_data = [p.to_dict() for p in position_info.positions]
         report_info = build_attendance_detail_pdf(
-            project_name, business_type, audit_month, bi_records, position_data, report_dir, results_data, contract
+            project_name, business_type, audit_month, audit_input, report_dir
         )
     elif report_type == "summary":
         report_info = build_summary_report_pdf(
-            project_name, business_type, audit_month, results_data, report_dir, contract
+            project_name, business_type, audit_month, audit_input, report_dir
         )
 
     report_id = report_dao.save_report(

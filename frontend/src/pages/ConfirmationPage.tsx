@@ -245,13 +245,26 @@ export function ConfirmationPage() {
 
   useEffect(() => {
     if (!auditContext) return
+    // 目标服务类型尚未审核：无需请求详情，直接清空并交由页面层提示
+    const opt = serviceTypeOptions.find((o) => o.value === effectiveServiceType)
+    if (opt && !opt.hasResult) {
+      setS04Data(null)
+      setAllRecords([])
+      setSelectedEmployee('')
+      setConfirmMap({})
+      setFreeDeductionMap({})
+      setFinalizeResult(null)
+      setMessage('')
+      setLoading(false)
+      return
+    }
     // 切换服务类型时清空上一类型的选择状态，避免勾选被带到另一个服务类型
     setSelectedEmployee('')
     setConfirmMap({})
     setFreeDeductionMap({})
     setFinalizeResult(null)
     loadData(effectiveServiceType)
-  }, [auditContext, effectiveServiceType])
+  }, [auditContext, effectiveServiceType, serviceTypeOptions])
 
   useEffect(() => {
     if (s04Data && s04Data.deduction_details.length && !selectedEmployee) {
@@ -424,7 +437,16 @@ export function ConfirmationPage() {
     <ServiceTypeTabs options={serviceTypeOptions} value={activeServiceType} onChange={setActiveServiceType} />
   )
 
+  const activeOption = serviceTypeOptions.find((o) => o.value === activeServiceType)
+  const isServiceTypeUnaudited = activeOption ? !activeOption.hasResult : false
+
   if (!auditContext) return <div className="text-slate-500">请先完成一次审核</div>
+  if (isServiceTypeUnaudited) return (
+    <div className="space-y-4">
+      {nav}
+      <div className="card p-8 text-center text-slate-500">该服务类型的审核尚未完成，暂无相关数据可查看</div>
+    </div>
+  )
   if (loading) return (
     <div className="space-y-4">
       {nav}

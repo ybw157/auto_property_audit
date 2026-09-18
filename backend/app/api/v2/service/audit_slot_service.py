@@ -25,10 +25,12 @@ from app.api.v2.utils.audit_common import (
     normalize_employee_name,
     normalize_position_name,
     normalize_business_type,
+    parse_time_value,
+    time_to_minutes,
+    resolve_cross_midnight,
     split_cross_day_clocks,
     shift_from_raw_position,
     get_next_date,
-    resolve_cross_midnight,
 )
 
 
@@ -149,21 +151,36 @@ def _audit_one_slot_day(
 ) -> dict | None:
     """判定一个槽位某一天的履约状态。返回 None 表示该天不计审核（休息/请假）。"""
     pos_name = position.position_name
-    statuses = [c.get("status", "") for c in cells]
-    if all(s in ("休息", "请假") for s in statuses):
-        kind = "请假" if any(s == "请假" for s in statuses) else "休息"
+    # 解析岗位班次信息，附带在每个 slot_detail 里
+    shift = shift_from_raw_position(position.shift_time)
+    is_cross = resolve_cross_midnight(position.cross_midnight_raw, shift.start_time, shift.end_time)
+    shift_start = shift.start_time or ""
+    shift_end = shift.end_time or ""
+
+    def _base_detail(**extra) -> dict:
+        """构造 slot_detail 基础结构，自动附带班次信息。"""
         return {
             "work_date": work_date,
             "position": pos_name,
             "slot_index": slot.slot_index,
             "area": slot.area,
-            "scheduled": [],
-            "status": kind,
-            "is_shortage": False,
-            "actual_present": [],
-            "note": "排班表标记" + kind,
+            "shift_start": shift_start,
+            "shift_end": shift_end,
+            "is_cross_midnight": is_cross,
             "cross_day_excluded": [],
+            **extra,
         }
+
+    statuses = [c.get("status", "") for c in cells]
+    if all(s in ("休息", "请假") for s in statuses):
+        kind = "请假" if any(s == "请假" for s in statuses) else "休息"
+        return _base_detail(
+            scheduled=[],
+            status=kind,
+            is_shortage=False,
+            actual_present=[],
+            note="排班表标记" + kind,
+        )
 
     has_shortage_marker = any(c.get("status", "") == "缺岗" for c in cells)
     persons = []
@@ -175,18 +192,13 @@ def _audit_one_slot_day(
     persons = list(dict.fromkeys(persons))
 
     if has_shortage_marker:
-        return {
-            "work_date": work_date,
-            "position": pos_name,
-            "slot_index": slot.slot_index,
-            "area": slot.area,
-            "scheduled": persons,
-            "status": "缺岗",
-            "is_shortage": True,
-            "actual_present": [],
-            "note": "排班表显式标注缺岗",
-            "cross_day_excluded": [],
-        }
+        return _base_detail(
+            scheduled=persons,
+            status="缺岗",
+            is_shortage=True,
+            actual_present=[],
+            note="排班表显式标注缺岗",
+        )
 
     if not persons:
         return None
@@ -200,18 +212,13 @@ def _audit_one_slot_day(
             ok, _, _ = _is_on_duty(p, work_date, attendance_by_person_date, person_shift_index)
             if ok:
                 present.append(p)
-        return {
-            "work_date": work_date,
-            "position": pos_name,
-            "slot_index": slot.slot_index,
-            "area": slot.area,
-            "scheduled": persons,
-            "status": "有人",
-            "is_shortage": False,
-            "actual_present": present,
-            "note": "排班人员当天有打卡",
-            "cross_day_excluded": [],
-        }
+        return _base_detail(
+            scheduled=persons,
+            status="有人",
+            is_shortage=False,
+            actual_present=present,
+            note="排班人员当天有打卡",
+        )
 
     own_sub = []
     for s in staff:
@@ -221,18 +228,13 @@ def _audit_one_slot_day(
         if ok:
             own_sub.append(s)
     if own_sub:
-        return {
-            "work_date": work_date,
-            "position": pos_name,
-            "slot_index": slot.slot_index,
-            "area": slot.area,
-            "scheduled": persons,
-            "status": "有人",
-            "is_shortage": False,
-            "actual_present": own_sub,
-            "note": f"排班人员未到，本岗人员{'、'.join(own_sub)}顶班",
-            "cross_day_excluded": [],
-        }
+        return _base_detail(
+            scheduled=persons,
+            status="有人",
+            is_shortage=False,
+            actual_present=own_sub,
+            note=f"排班人员未到，本岗人员{'、'.join(own_sub)}顶班",
+        )
 
     others = [
         n for n in attendance_by_date.get(work_date, set())
@@ -240,44 +242,36 @@ def _audit_one_slot_day(
     ]
     if others:
         if SUBSTITUTE_OTHER_POLICY == "present":
-            return {
-                "work_date": work_date, "position": pos_name,
-                "slot_index": slot.slot_index, "area": slot.area,
-                "scheduled": persons, "status": "有人", "is_shortage": False,
-                "actual_present": others,
-                "note": f"排班人员未到，其他岗位人员{'、'.join(others[:3])}当天打卡（按有人处理）",
-                "cross_day_excluded": [],
-            }
+            return _base_detail(
+                scheduled=persons,
+                status="有人",
+                is_shortage=False,
+                actual_present=others,
+                note=f"排班人员未到，其他岗位人员{'、'.join(others[:3])}当天打卡（按有人处理）",
+            )
         if SUBSTITUTE_OTHER_POLICY == "shortage":
-            return {
-                "work_date": work_date, "position": pos_name,
-                "slot_index": slot.slot_index, "area": slot.area,
-                "scheduled": persons, "status": "缺岗", "is_shortage": True,
-                "actual_present": [],
-                "note": f"排班人员未到，仅其他岗位人员{'、'.join(others[:3])}打卡（按缺岗处理）",
-                "cross_day_excluded": [],
-            }
-        return {
-            "work_date": work_date, "position": pos_name,
-            "slot_index": slot.slot_index, "area": slot.area,
-            "scheduled": persons, "status": "待复核", "is_shortage": False,
-            "actual_present": others,
-            "note": f"排班人员未到，现场有其他岗位人员{'、'.join(others[:3])}打卡，需确认是否顶岗",
-            "cross_day_excluded": [],
-        }
+            return _base_detail(
+                scheduled=persons,
+                status="缺岗",
+                is_shortage=True,
+                actual_present=[],
+                note=f"排班人员未到，仅其他岗位人员{'、'.join(others[:3])}打卡（按缺岗处理）",
+            )
+        return _base_detail(
+            scheduled=persons,
+            status="待复核",
+            is_shortage=False,
+            actual_present=others,
+            note=f"排班人员未到，现场有其他岗位人员{'、'.join(others[:3])}打卡，需确认是否顶岗",
+        )
 
-    return {
-        "work_date": work_date,
-        "position": pos_name,
-        "slot_index": slot.slot_index,
-        "area": slot.area,
-        "scheduled": persons,
-        "status": "缺岗",
-        "is_shortage": True,
-        "actual_present": [],
-        "note": "排班人员未到且项目当天无人打卡",
-        "cross_day_excluded": [],
-    }
+    return _base_detail(
+        scheduled=persons,
+        status="缺岗",
+        is_shortage=True,
+        actual_present=[],
+        note="排班人员未到且项目当天无人打卡",
+    )
 
 
 def run_slot_audit(

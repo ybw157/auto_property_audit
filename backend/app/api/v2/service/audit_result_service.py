@@ -3,7 +3,7 @@ import re
 from calendar import monthrange
 from datetime import datetime
 from fastapi import HTTPException
-from app.api.v2.core.database import json_dumps
+from app.api.v2.core.database import json_dumps, now_text
 from app.api.v2.core.result import Result
 from app.api.v2.dao import audit_result_dao, position_dao, bi_dao, contract_dao
 from app.api.v2.models.audit_result_models import AuditResult
@@ -299,8 +299,6 @@ def start_audit(
     print(f"{'='*60}")
 
     result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
-    if result and result.locked:
-        raise HTTPException(status_code=400, detail="该审核已锁定，不能重新审核")
 
     # 1) 加载岗位信息（含排班槽位）
     print(f"\n[步骤1] 加载岗位信息...")
@@ -463,7 +461,6 @@ def start_audit(
         ai_analysis="",
         versions_json="[]",
         logs_json="[]",
-        locked=0,
         confirmed_by="",
         confirmed_at="",
     )
@@ -511,17 +508,19 @@ def confirm_audit(
     confirmed_by: str,
     service_type: str = "",
 ) -> dict:
-    """确认审核结果（只锁定指定服务类型的那一条）。"""
+    """确认审核结果（记录确认人/确认时间，不再上锁，可重复确认）。"""
     result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
         raise HTTPException(status_code=404, detail="未找到审核结果")
-    if result.locked:
-        raise HTTPException(status_code=400, detail="已锁定，不能重复确认")
 
-    audit_result_dao.lock_audit_result(
-        project_name, business_type, audit_month, confirmed_by, service_type
+    audit_result_dao.update_audit_result_fields(
+        project_name, business_type, audit_month,
+        service_type=service_type,
+        confirmed_by=confirmed_by,
+        confirmed_at=now_text(),
+        status="已确认",
     )
-    return {"message": "审核结果已确认并锁定"}
+    return {"message": "审核结果已确认"}
 
 
 def update_audit_result(
@@ -537,8 +536,6 @@ def update_audit_result(
     result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
         raise HTTPException(status_code=404, detail="未找到审核结果")
-    if result.locked:
-        raise HTTPException(status_code=400, detail="审核已锁定，不能修改")
 
     from app.api.v2.core.database import json_dumps
 
@@ -574,8 +571,6 @@ def confirm_exceptions(
     result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
         raise HTTPException(status_code=404, detail="未找到审核结果")
-    if result.locked:
-        raise HTTPException(status_code=400, detail="审核已锁定，不能修改")
 
     data = json_loads(result.results_json, {})
     s04_audit = data.get("s04_attendance_audit", {})
@@ -680,14 +675,12 @@ def finalize_audit(
     confirmed_by: str,
     service_type: str = "",
 ) -> dict:
-    """确认最终版：根据确认记录计算最终扣款，锁定审核结果（只锁定指定服务类型那一条）。"""
+    """确认最终版：根据确认记录计算最终扣款并标记审核结果（不再锁定，可重复执行）。"""
     from app.api.v2.core.database import json_dumps, json_loads, now_text
 
     result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
         raise HTTPException(status_code=404, detail="未找到审核结果")
-    if result.locked:
-        raise HTTPException(status_code=400, detail="审核已锁定，不能重复确认")
 
     data = json_loads(result.results_json, {})
     s04_audit = data.get("s04_attendance_audit", {})
@@ -828,14 +821,13 @@ def finalize_audit(
         project_name, business_type, audit_month,
         service_type=service_type,
         results_json=json_dumps(data),
+        confirmed_by=confirmed_by,
+        confirmed_at=now_text(),
         status="已确认",
-    )
-    audit_result_dao.lock_audit_result(
-        project_name, business_type, audit_month, confirmed_by, service_type
     )
 
     return {
-        "message": "审核结果已确认并锁定",
+        "message": "审核结果已确认",
         "total_deduction": total_deduction,
         "affected_employees": data["final_summary"]["affected_employees"],
         "confirmed_count": confirmed_count,

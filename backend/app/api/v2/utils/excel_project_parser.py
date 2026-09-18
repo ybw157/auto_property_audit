@@ -16,6 +16,7 @@ from app.api.v2.models.position_models import PositionInfo, Position, ScheduleSl
 from app.api.v2.utils.audit_common import (
     classify_schedule_cell,
     extract_position_shift_tag,
+    normalize_position_name,
     position_name_with_shift_tag,
     strip_position_time_suffix,
 )
@@ -187,21 +188,29 @@ def _attach_slots_to_positions(
 ) -> int:
     """把排班槽位挂到对应岗位（岗位表的子表），返回未匹配到编制表岗位的槽位数。
 
-    匹配策略（由严到宽）：
-      1. 「带班次标签的岗位名」精确匹配 —— 槽位带（白）/（晚）且编制表同名岗位也
-         带相同标签时必须命中。这是白/晚班不串岗的关键；
-      2. 「不带标签的岗位名」聚合匹配 —— 排班表或编制表任一方未标班次时的兜底；
+    匹配策略（由严到宽，逐级回退）：
+      1. 「全名精确匹配」—— 排班表岗位全称规范化后与编制表岗位全称规范化后精确比较。
+         "消控员 (A)" == "消控员 (A)" → 直接命中，白班夜班不串岗。
+         处理空格/全半角差异："内场安全员(B)" 规范化后 == "内场安全员 (B)"。
+      2. 「带班次标签匹配」—— 全名不匹配时，用正则提取班次标签（白/晚/夜/早/中/A/B/甲/乙...），
+         strip 后的岗位名 + 标签精确匹配。"东门门岗（晚）" → "东门门岗(晚)"。
+      3. 「不带标签的聚合匹配」—— 以上都不匹配时的兜底，按 strip 后岗位名聚合。
+         排班表或编制表任一方未标班次时走此分支。
     同业态优先；无匹配时 fallback 到不限业态的轮询匹配，兼容排班表业态与
     编制表业态不一致的情况。
 
     slot_tuples: (slot, position_name, raw_position, business_type)。
     """
-    # pos_index:     strip 后岗位名 → [(业态, Position), ...]（不带班次标签，兜底用）
-    # pos_index_tag: 带班次标签的岗位名 → [(业态, Position), ...]（精确挂接用）
+    # pos_full:   规范化全名 → [(业态, Position), ...]（全名精确匹配用）
+    # pos_index:   strip 后岗位名 → [(业态, Position), ...]（不带标签兜底用）
+    # pos_index_tag: 带班次标签的岗位名 → [(业态, Position), ...]（标签精确匹配用）
+    pos_full: dict[str, list] = {}
     pos_index: dict[str, list] = {}
     pos_index_tag: dict[str, list] = {}
     for pi in position_infos:
         for p in pi.positions:
+            full_key = normalize_position_name(p.position_name)
+            pos_full.setdefault(full_key, []).append((pi.business_type, p))
             key = strip_position_time_suffix(p.position_name)
             pos_index.setdefault(key, []).append((pi.business_type, p))
             tagged_key = position_name_with_shift_tag(p.position_name)
@@ -215,19 +224,23 @@ def _attach_slots_to_positions(
         contract_pos_name = _map_schedule_position_to_contract(position_name)
         np_ = strip_position_time_suffix(contract_pos_name)
 
-        # 优先按「带班次标签」的岗位名精确匹配：白班槽位只挂白班岗位，晚班槽位只挂晚班岗位。
-        # 标签优先取排班表原始岗位名（raw_position，"东门门岗（晚）"），
-        # 因为 position_name 已被 strip 掉标签。
-        shift_tag = (
-            extract_position_shift_tag(raw_position)
-            or extract_position_shift_tag(contract_pos_name)
-        )
-        match_key = f"{np_}({shift_tag})" if shift_tag else np_
-        candidates = pos_index_tag.get(match_key)
+        # --- 1. 全名精确匹配（规范化后比较）---
+        full_key = normalize_position_name(raw_position)
+        candidates = pos_full.get(full_key)
+        match_key = full_key
+
+        # --- 2. 带班次标签匹配 ---
         if not candidates:
-            # 兜底：编制表未标班次（或排班表未标班次）时退回不带标签的聚合匹配
-            match_key = np_
-            candidates = pos_index.get(np_)
+            shift_tag = (
+                extract_position_shift_tag(raw_position)
+                or extract_position_shift_tag(contract_pos_name)
+            )
+            match_key = f"{np_}({shift_tag})" if shift_tag else np_
+            candidates = pos_index_tag.get(match_key)
+            if not candidates:
+                # --- 3. 兜底：不带标签的聚合匹配 ---
+                match_key = np_
+                candidates = pos_index.get(np_)
 
         target = None
         if candidates:
@@ -506,7 +519,7 @@ def _parse_contract_positions(ws) -> list[tuple[str, Position]]:
             actual_count=int(_safe_float(_col("actual_count", 0))),
             mid_clock_time=_safe_str(_col("mid_clock", "")),
             cross_midnight_raw=_safe_str(_col("cross_midnight", "")),
-            is_cross_midnight=cross_midnight_raw == "是",
+            is_cross_midnight=_safe_str(_col("cross_midnight", "")) == "是",
         )
         positions.append((last_biz_type, position))
     return positions

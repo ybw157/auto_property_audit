@@ -685,6 +685,134 @@ def format_detail_schedule_time(detail: dict) -> str:
     end = detail.get("shift_end_time", "")
     return f"{start}-{end}" if start and end else str(detail.get("shift_name", ""))
 
+# ─────────────────────── 按服务类型分章（保安 / 保洁） ───────────────────────
+
+def build_service_banner(label: str):
+    """生成服务类型分章横幅（蓝色底白字，占满整行宽度）。"""
+    inner = ParagraphStyle(
+        "SvcBanner", fontName=FONT_NAME, fontSize=13, leading=20, textColor=colors.white
+    )
+    t = Table([[Paragraph(f"◆ {label}", inner)]], colWidths=[None])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#1E3A8A")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    return t
+
+
+def build_service_items_fee_table(position_data: list[dict]):
+    """服务项目 / 人员配置 / 工时 / 费用 一览表（按服务类型分章用）。"""
+    if not position_data:
+        return [Paragraph("暂无岗位数据", styles()["CNBody"]), Spacer(1, 8)]
+    data = [["岗位", "区域", "编制人数", "实际人数", "日工时", "月工时", "工时单价(元)", "月度合价(元)"]]
+    for p in position_data:
+        name = str(p.get("position_name", "") or p.get("position", ""))
+        areas = set()
+        for slot in (p.get("slots") or []):
+            a = str(slot.get("area", "") or "").strip()
+            if a:
+                areas.add(a)
+        area = "、".join(sorted(areas))
+        staff = p.get("staff_list") or []
+        contracted = len(staff) if staff else (p.get("contracted_count") or "")
+        actual = p.get("actual_count") or ""
+        daily = p.get("daily_hours") or 0
+        monthly = p.get("monthly_hours") or 0
+        rate = p.get("hourly_rate") or 0
+        total = p.get("monthly_total") or 0
+        data.append([name, area, str(contracted), str(actual), str(daily), str(monthly), str(rate), str(total)])
+    table = Table(
+        wrap_table_data(data, "service_items"),
+        colWidths=[42*mm, 36*mm, 20*mm, 20*mm, 18*mm, 18*mm, 24*mm, 28*mm],
+        repeatRows=1,
+    )
+    table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), FONT_NAME),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("LEADING", (0, 0), (-1, -1), 11),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BBBBBB")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F1F5F9")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    return [table, Spacer(1, 8)]
+
+
+def build_service_chapter(story, results, position_data, service_label, s, chapter_no):
+    """在 story 上追加一个服务类型（保安 / 保洁）的独立章节。"""
+    story.append(build_service_banner(f"第 {chapter_no} 部分　{service_label}服务"))
+    story.append(Spacer(1, 6))
+
+    # 一、服务项目、人员配置与费用
+    story.append(Paragraph(f"一、{service_label}服务项目、人员配置与费用", s["CNHeading"]))
+    story.extend(build_service_items_fee_table(position_data))
+
+    summary = results.get("summary", {})
+    schedule_count = summary.get("schedule_task_count", 0) or 0
+    first_exception_count = summary.get("exception_count", 0) or 0
+    first_exception_rate = summary.get("first_exception_rate") or (
+        round(first_exception_count / schedule_count * 100, 1) if schedule_count > 0 else 0)
+    confirmed_exception_count = summary.get("confirmed_exception_count", 0) or 0
+    confirmed_exception_rate = summary.get("confirmed_exception_rate") or (
+        round(confirmed_exception_count / schedule_count * 100, 1) if schedule_count > 0 else 0)
+    total_deduction = summary.get("total_deduction", 0) or 0
+    confirmed_count = summary.get("confirmed_count", 0) or 0
+
+    # 二、核心审核指标
+    story.append(Paragraph(f"二、{service_label}核心审核指标", s["CNHeading"]))
+    story.extend(simple_table([
+        ["排班数", schedule_count, "第一次异常数", first_exception_count],
+        ["第一次异常率", f"{first_exception_rate}%", "确认后异常数", confirmed_exception_count],
+        ["确认后异常率", f"{confirmed_exception_rate}%", "总扣款金额", f"{total_deduction}元"],
+    ], [35*mm, 50*mm, 35*mm, 50*mm]))
+
+    # 三、异常率说明
+    story.append(Paragraph(f"三、{service_label}异常率说明", s["CNHeading"]))
+    story.append(Paragraph(
+        f"第一次审核异常率 = 第一次异常数 / 排班任务 = {first_exception_count} / {schedule_count} = {first_exception_rate}%。"
+        f"该数值反映系统初次审核发现的异常比例。", s["CNBody"]))
+    story.append(Paragraph(
+        f"确认后异常率 = 确认异常条数 / 排班任务 = {confirmed_exception_count} / {schedule_count} = {confirmed_exception_rate}%。"
+        f"该数值反映项目确认后实际需扣款的异常比例。", s["CNBody"]))
+    story.append(Paragraph(f"本次审核共确认{confirmed_count}条异常，总扣款{total_deduction}元。", s["CNBody"]))
+
+    # 四、审核总结与请款说明
+    story.append(Paragraph(f"四、{service_label}审核总结与请款说明", s["CNHeading"]))
+    story.append(Paragraph(build_copyable_summary(results), s["CNBody"]))
+
+    # 五、扣款明细
+    deductions = results.get("attendance_deductions", [])
+    if deductions:
+        story.append(Paragraph(f"五、{service_label}扣款明细", s["CNHeading"]))
+        story.extend(table_flow(deductions[:50], "attendance_deductions"))
+
+    # 六、管理建议
+    story.append(Paragraph(f"六、{service_label}管理建议", s["CNHeading"]))
+    for line in build_management_suggestions(results):
+        story.append(Paragraph(line, s["CNBody"]))
+
+
+def build_service_attendance_chapter(story, results, service_label, s, chapter_no):
+    """在 story 上追加一个服务类型（保安 / 保洁）的考勤明细章节。"""
+    story.append(build_service_banner(f"第 {chapter_no} 部分　{service_label}服务 · 考勤明细"))
+    story.append(Spacer(1, 6))
+    tables = build_attendance_base_tables(results)
+    if not tables:
+        story.append(Paragraph("暂无考勤明细数据", s["CNBody"]))
+    for t in tables:
+        story.append(t)
+        story.append(Spacer(1, 6))
+
+
 def build_management_suggestions(results: dict) -> list[str]:
     """根据实际异常数据生成针对性管理建议"""
     from collections import defaultdict
