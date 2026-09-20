@@ -9,6 +9,7 @@ class AuditResult(Base):
     __tablename__ = "audit_results"
     # 同一项目同一业态同一月份下，保安/保洁各自独立存一份审核结果，
     # 因此唯一键必须包含 service_type，否则后审核的服务类型会覆盖先审核的。
+    # 索引名与 tools/migration.sql、core/database.py 的迁移保持一致。
     __table_args__ = (
         UniqueConstraint(
             "project_name", "business_type", "audit_month", "service_type",
@@ -19,7 +20,11 @@ class AuditResult(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     project_name: Mapped[str] = mapped_column(String(255), nullable=False)
     business_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    service_type: Mapped[str] = mapped_column(String(50), default="")
+    # 定位键第四列，与 position_infos.service_type 同口径；写入侧缺失时由
+    # core/validators.require_service_type 拦下，不允许出现空串行。
+    service_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="", server_default=""
+    )
     audit_month: Mapped[str] = mapped_column(String(10), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="待审核")
     version: Mapped[int] = mapped_column(Integer, default=1)

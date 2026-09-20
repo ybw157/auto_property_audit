@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from fastapi import UploadFile, HTTPException
 from app.api.v2.core.config import settings
+from app.api.v2.core.validators import require_project_name, require_service_type
 from app.api.v2.dao import position_dao
 from app.api.v2.utils.excel_project_parser import parse_project_excel
 
@@ -60,7 +61,7 @@ def normalize_audit_month(value: str) -> str:
 
 def upload_and_parse_excel(
     file: UploadFile,
-    force_project_name: str = "",
+    project_name: str = "",
     audit_month: str = "",
     service_type: str = "",
 ) -> dict:
@@ -68,17 +69,26 @@ def upload_and_parse_excel(
     上传并解析项目岗位 Excel 表格，将结果存入数据库
 
     :param file: Excel 文件
-    :param force_project_name: 强制使用的项目名（来自登录用户信息），非空时覆盖 Excel 解析出的项目名
+    :param project_name: 项目名称，**唯一来源是登录用户信息**（controller 层
+                        resolve_project_name 传入）。Excel 里的「项目名称」列不再解析，
+                        本参数既决定库表定位键第一列，也写入表内数据。
+                         **必填**：为空说明登录账号未绑定项目，直接报
+                         「缺少「项目名称」字段数据」。
     :param audit_month: 审核月，来自 AI 审核页「选择审核月」控件（YYYYMM / YYYY-MM 均可）。
                         为唯一月份来源：同时用于库表定位与表内排班日期，
                         不再从文件名或 Sheet 名推断（Sheet 名缺月份时会导致月份为空、
                         与审核时读取的月份对不上，岗位因此无法被识别）。
                         未传入时才回退到文件名 / Sheet 名推断（兼容旧调用方）。
     :param service_type: 服务类型（保安/保洁），来自 AI 审核页「选择服务类型」控件。
-                         不使用任何默认值或硬编码，原样写入 PositionInfo.service_type。
+                         **必填**：它是 (项目, 业态, 月份, 服务类型) 定位键的第四列，
+                         缺失时直接报「缺少「服务类型」字段数据」，不做分支判断、不给默认值，
+                         否则同一 (项目, 业态, 月份) 下保安与保洁会互相覆盖。
     :return: 解析结果
     """
     filename = file.filename or ""
+    # 先校验项目名与服务类型再落盘：缺字段就不该产生任何文件与记录
+    project_name = require_project_name(project_name)
+    service_type = require_service_type(service_type)
 
     # 保存到临时目录
     upload_dir = Path(settings.upload_dir) / "positions"
@@ -103,24 +113,24 @@ def upload_and_parse_excel(
             file_path,
             audit_month=audit_month_iso,
             service_type=service_type,
-            force_project_name=force_project_name,
+            project_name=project_name,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Excel 解析失败：{str(e)}")
 
     # 赋值月份、服务类型并保存到数据库
     for info in position_infos:
-        # 项目名称一律取自登录用户（force_project_name），不使用 Excel 内解析出的项目名
-        info.project_name = force_project_name
+        # 项目名称一律取自登录用户，Excel 内已无项目名可解析
+        info.project_name = project_name
         info.audit_month = audit_month
-        info.service_type = service_type or ""
+        info.service_type = service_type
         position_dao.save_position_info(info)
 
     return {
         "positions": [info.to_dict() for info in position_infos],
         "audit_month": audit_month,
         "bi_month": bi_month,
-        "service_type": service_type or "",
+        "service_type": service_type,
     }
 
 
@@ -142,15 +152,24 @@ def update_position_info(
     contracted_count: int | None = None,
     actual_count: int | None = None,
     positions_json: list | None = None,
+    service_type: str = "",
 ) -> dict:
-    info = position_dao.get_position_info(project_name, business_type, audit_month)
+    """按四列定位键更新岗位信息；服务类型缺失即报错，不会顺手改到另一服务类型。"""
+    service_type = require_service_type(service_type)
+    info = position_dao.get_position_info(project_name, business_type, audit_month, service_type)
     if not info:
         raise HTTPException(status_code=404, detail="未找到该岗位信息")
     position_dao.update_position_info(
-        project_name, business_type, audit_month,
+        project_name, business_type, audit_month, service_type,
         supplier=supplier,
         contracted_count=contracted_count,
         actual_count=actual_count,
         positions_json=positions_json,
     )
-    return {"message": "岗位信息更新成功", "project_name": project_name, "business_type": business_type, "audit_month": audit_month}
+    return {
+        "message": "岗位信息更新成功",
+        "project_name": project_name,
+        "business_type": business_type,
+        "audit_month": audit_month,
+        "service_type": service_type,
+    }

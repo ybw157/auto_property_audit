@@ -135,6 +135,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
       })
     }
     for (const late of d.late_details || []) {
+      if ((late.amount || 0) <= 0) continue  // S04-1 迟到>60min 已转漏打卡，不渲染文档行
       const dateStr = late.date || ''
       const confKey = `late|${d.employee_name}|${dateStr}`
       const conf = confs[confKey]
@@ -158,10 +159,11 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
       })
     }
     for (const early of d.early_leave_details || []) {
+      if ((early.amount || 0) <= 0) continue  // S04-1 早退>60min 已转漏打卡，不渲染文档行
       const dateStr = early.date || ''
       const confKey = `early_leave|${d.employee_name}|${dateStr}`
       const conf = confs[confKey]
-      const tierLabel = early.tier === 'S04-2' ? '早退≤30min' : early.tier === 'S04-3' ? '早退30-60min' : '早退>60min(转漏打卡)'
+      const tierLabel = early.tier === 'S04-2' ? '早退≤30min' : early.tier === 'S04-3' ? '早退30-60min' : '早退>60min(转缺勤)'
       const shift = early.shift_start ? `${early.shift_start}-${early.shift_end || ''}` : ''
       const clocks = (early.clock_times && early.clock_times.length > 0) ? early.clock_times.join('\n') : (early.clock_out ? String(early.clock_out) : '')
       records.push({
@@ -232,9 +234,9 @@ export function ConfirmationPage() {
   const [confirmMap, setConfirmMap] = useState<Record<string, boolean>>({})
   const [freeDeductionMap, setFreeDeductionMap] = useState<Record<string, boolean>>({})
   const [saving, setSaving] = useState(false)
-  const [finalizing, setFinalizing] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const [message, setMessage] = useState('')
-  const [finalizeResult, setFinalizeResult] = useState<{
+  const [confirmResult, setConfirmResult] = useState<{
     confirmed_count: number
     total_deduction: number
     first_exception_rate: number
@@ -242,7 +244,6 @@ export function ConfirmationPage() {
     message: string
   } | null>(null)
   const [allRecords, setAllRecords] = useState<ExceptionRecord[]>([])
-  const [isLocked, setIsLocked] = useState(false)
   const { options: serviceTypeOptions, active: activeServiceType, setActive: setActiveServiceType } =
     useServiceTypes(auditContext ?? null)
   const effectiveServiceType = activeServiceType || auditContext?.service_type || ''
@@ -257,7 +258,7 @@ export function ConfirmationPage() {
       setSelectedEmployee('')
       setConfirmMap({})
       setFreeDeductionMap({})
-      setFinalizeResult(null)
+      setConfirmResult(null)
       setMessage('')
       setLoading(false)
       return
@@ -266,7 +267,7 @@ export function ConfirmationPage() {
     setSelectedEmployee('')
     setConfirmMap({})
     setFreeDeductionMap({})
-    setFinalizeResult(null)
+    setConfirmResult(null)
     loadData(effectiveServiceType)
   }, [auditContext, effectiveServiceType, serviceTypeOptions])
 
@@ -300,7 +301,6 @@ export function ConfirmationPage() {
         summary: raw.summary || {},
       }
       setS04Data(s04Audit)
-      setIsLocked(!!detail?.locked)
       const records = buildExceptionRecords(s04Audit.deduction_details || [])
       setAllRecords(records)
       const cMap: Record<string, boolean> = {}
@@ -311,7 +311,6 @@ export function ConfirmationPage() {
       }
       setConfirmMap(cMap)
       setFreeDeductionMap(fMap)
-      setFinalizeResult(null)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '加载失败')
     }
@@ -319,7 +318,6 @@ export function ConfirmationPage() {
   }
 
   function toggleConfirm(key: string) {
-    if (isLocked) return
     setConfirmMap({ ...confirmMap, [key]: !confirmMap[key] })
   }
 
@@ -328,7 +326,6 @@ export function ConfirmationPage() {
   }
 
   function handleFreeDeduction(key: string) {
-    if (isLocked) return
     const record = allRecords.find(r => r.key === key)
     if (!record) return
     if (freeDeductionMap[key]) {
@@ -353,7 +350,6 @@ export function ConfirmationPage() {
   }
 
   function selectAllForEmployee(emp: string) {
-    if (isLocked) return
     const empRecords = allRecords.filter(r => r.employee_name === emp)
     const allChecked = empRecords.every(r => confirmMap[r.key])
     const updates: Record<string, boolean> = {}
@@ -363,10 +359,7 @@ export function ConfirmationPage() {
     setConfirmMap({ ...confirmMap, ...updates })
   }
 
-  async function saveConfirm() {
-    if (!auditContext || !s04Data || isLocked) return
-    setSaving(true)
-    setMessage('')
+  function buildConfirmRecords() {
     const records: Array<{ employee_name: string; work_date: string; exception_type: string; window: string; confirmed: boolean; confirm_note: string; free_deduction: boolean }> = []
     for (const r of allRecords) {
       records.push({
@@ -379,20 +372,33 @@ export function ConfirmationPage() {
         free_deduction: freeDeductionMap[r.key] ?? false,
       })
     }
+    return records
+  }
+
+  // 异常确认即定稿：这一次提交既写入确认结果，也把该审核结果就地改写为唯一最终版
+  async function submitConfirm() {
+    if (!auditContext) throw new Error('请先完成一次审核')
+    return request<any>(`/api/v2/audit-results/confirm-exceptions`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project_name: auditContext.project_name,
+        business_type: auditContext.business_type,
+        audit_month: auditContext.audit_month,
+        service_type: effectiveServiceType,
+        confirmed_records: buildConfirmRecords(),
+        confirmed_by: user?.username || '审核员',
+      }),
+    })
+  }
+
+  async function saveConfirm() {
+    if (!auditContext || !s04Data) return
+    setSaving(true)
+    setMessage('')
     try {
-      await request(`/api/v2/audit-results/confirm-exceptions`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_name: auditContext.project_name,
-          business_type: auditContext.business_type,
-          audit_month: auditContext.audit_month,
-          service_type: effectiveServiceType,
-          confirmed_records: records,
-          confirmed_by: user?.username || '审核员',
-        }),
-      })
-      setMessage('确认已提交')
+      const result = await submitConfirm()
+      setMessage(`确认已提交：审核结果已定稿，总扣款 ¥${Number(result?.total_deduction ?? 0).toFixed(2)}`)
       await loadData()
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '提交失败')
@@ -401,40 +407,32 @@ export function ConfirmationPage() {
   }
 
   async function generateReport() {
-    if (!auditContext || isLocked) return
-    if (!confirm('生成扣款报告将按确认结果重新计算扣款金额，并生成审核汇总报告。是否继续？')) return
-    setFinalizing(true)
+    if (!auditContext) return
+    if (!confirm('生成扣款报告将按确认结果重新计算扣款金额、定稿审核结果，并生成审核汇总报告。是否继续？')) return
+    setSubmitting(true)
     setMessage('')
     try {
-      const result = await request<any>(`/api/v2/audit-results/finalize`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_name: auditContext.project_name,
-          business_type: auditContext.business_type,
-          audit_month: auditContext.audit_month,
-          service_type: effectiveServiceType,
-        }),
+      // 定稿：异常确认就地改写审核结果。审核结果页与 PDF 报告读的都是这一份。
+      const result = await submitConfirm()
+      setConfirmResult({
+        confirmed_count: result?.confirmed_count ?? 0,
+        total_deduction: result?.total_deduction ?? 0,
+        first_exception_rate: result?.first_exception_rate ?? 0,
+        confirmed_exception_rate: result?.confirmed_exception_rate ?? 0,
+        message: result?.message || '',
       })
-      setFinalizeResult({
-        confirmed_count: result.confirmed_count ?? result.confirmedCount ?? 0,
-        total_deduction: result.total_deduction,
-        first_exception_rate: result.first_exception_rate ?? 0,
-        confirmed_exception_rate: result.confirmed_exception_rate ?? 0,
-        message: result.message,
-      })
-      setMessage('审核结果已锁定，正在生成审核汇总与扣款报告...')
+      setMessage('审核结果已定稿，正在生成审核汇总与扣款报告...')
       // "生成扣款报告"即生成汇总与扣款报告（内含扣款明细）
       await request(
         `/api/v2/reports/generate?project_name=${encodeURIComponent(auditContext.project_name)}&business_type=${encodeURIComponent(auditContext.business_type)}&audit_month=${encodeURIComponent(auditContext.audit_month)}&service_type=${encodeURIComponent(effectiveServiceType)}&report_type=summary`,
         { method: 'POST' }
       )
-      setMessage(result.message || '审核汇总与扣款报告已生成，可前往"PDF报告"页下载。')
+      setMessage('审核汇总与扣款报告已生成，可前往"PDF报告"页下载。')
       await loadData()
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '报告生成失败')
     }
-    setFinalizing(false)
+    setSubmitting(false)
   }
 
   const nav = (
@@ -492,38 +490,24 @@ export function ConfirmationPage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {isLocked ? (
-            <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-3 py-1.5 text-sm font-medium text-red-700">
-              已锁定
-            </span>
-          ) : (
-            <>
-              <button
-                className="btn-secondary"
-                disabled={saving || finalizing}
-                onClick={saveConfirm}
-              >
-                {saving ? '提交中...' : '提交确认'}
-              </button>
-              <button
-                className="btn-primary"
-                disabled={saving || finalizing}
-                onClick={generateReport}
-              >
-                {finalizing ? '生成报告中...' : '生成扣款报告'}
-              </button>
-            </>
-          )}
+          <button
+            className="btn-secondary"
+            disabled={saving || submitting}
+            onClick={saveConfirm}
+          >
+            {saving ? '提交中...' : '提交确认'}
+          </button>
+          <button
+            className="btn-primary"
+            disabled={saving || submitting}
+            onClick={generateReport}
+          >
+            {submitting ? '生成报告中...' : '生成扣款报告'}
+          </button>
         </div>
       </div>
 
       {message && <div className="rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">{message}</div>}
-
-      {isLocked && (
-        <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-sm text-red-700">
-          <p className="font-medium">该审核结果已确认并锁定，不可再修改。</p>
-        </div>
-      )}
 
       {/* 操作说明 */}
       <div className="rounded-lg bg-blue-50 p-4 text-sm text-blue-700">
@@ -531,35 +515,35 @@ export function ConfirmationPage() {
         <p className="mt-1">1. 勾选异常记录表示项目确认该异常属实，将计入扣款</p>
         <p>2. 未勾选的记录表示项目有异议，将不计入扣款</p>
         <p>3. 点击"免打卡"可将该条异常标记为免打卡，免打卡的记录不扣款（每人每月有免打卡次数上限）</p>
-        <p>4. 点击"提交确认"保存确认与免打卡状态</p>
-        <p>5. 点击"生成扣款报告"按确认结果重新计算扣款金额，并生成审核汇总与扣款报告</p>
-        <p>6. 生成完成后审核结果将被锁定，可多次修改并重新提交、重新生成</p>
+        <p>4. 点击"提交确认"保存确认与免打卡状态，并据此定稿本次审核结果</p>
+        <p>5. 点击"生成扣款报告"按定稿结果生成审核汇总与扣款报告</p>
+        <p>6. 可多次修改确认结果并重新提交、重新生成报告（每次提交都会按最新确认结果重新定稿）</p>
       </div>
 
       {/* 报告生成结果 */}
-      {finalizeResult && (
+      {confirmResult && (
         <div className="card p-5">
           <h3 className="text-base font-semibold text-slate-900">扣款报告已生成</h3>
           <div className="mt-3 grid grid-cols-2 gap-4 lg:grid-cols-4">
             <div className="rounded-lg bg-slate-50 p-4 text-center">
-              <div className="text-2xl font-bold text-slate-900">{finalizeResult.confirmed_count}</div>
+              <div className="text-2xl font-bold text-slate-900">{confirmResult.confirmed_count}</div>
               <div className="text-sm text-slate-500">确认异常条数</div>
             </div>
             <div className="rounded-lg bg-red-50 p-4 text-center">
-              <div className="text-2xl font-bold text-red-600">¥{finalizeResult.total_deduction.toFixed(2)}</div>
+              <div className="text-2xl font-bold text-red-600">¥{confirmResult.total_deduction.toFixed(2)}</div>
               <div className="text-sm text-slate-500">总扣款金额（元）</div>
             </div>
             <div className="rounded-lg bg-amber-50 p-4 text-center">
-              <div className="text-2xl font-bold text-amber-600">{finalizeResult.first_exception_rate}%</div>
+              <div className="text-2xl font-bold text-amber-600">{confirmResult.first_exception_rate}%</div>
               <div className="text-sm text-slate-500">第一次审核异常率</div>
             </div>
             <div className="rounded-lg bg-blue-50 p-4 text-center">
-              <div className="text-2xl font-bold text-blue-600">{finalizeResult.confirmed_exception_rate}%</div>
+              <div className="text-2xl font-bold text-blue-600">{confirmResult.confirmed_exception_rate}%</div>
               <div className="text-sm text-slate-500">确认后异常率</div>
             </div>
           </div>
-          <p className="mt-3 text-sm text-slate-600">{finalizeResult.message}</p>
-          <p className="mt-2 text-xs text-slate-400">审核结果已锁定，请到"审核结果"页面查看扣款明细</p>
+          <p className="mt-3 text-sm text-slate-600">{confirmResult.message}</p>
+          <p className="mt-2 text-xs text-slate-400">可到"审核结果"页面查看扣款明细</p>
         </div>
       )}
 
@@ -606,14 +590,12 @@ export function ConfirmationPage() {
                 <h3 className="text-sm font-medium text-slate-700">
                   {selectedEmployee} 的异常记录（{currentRecords.length}条）
                 </h3>
-                {!isLocked && (
-                  <button
-                    className="text-xs text-brand-600 underline"
-                    onClick={() => selectAllForEmployee(selectedEmployee)}
-                  >
-                    全选/取消全选
-                  </button>
-                )}
+                <button
+                  className="text-xs text-brand-600 underline"
+                  onClick={() => selectAllForEmployee(selectedEmployee)}
+                >
+                  全选/取消全选
+                </button>
               </div>
               <div className="overflow-auto">
                 <table className="min-w-full table-fixed divide-y divide-slate-200 text-sm">
@@ -636,7 +618,7 @@ export function ConfirmationPage() {
                       const free = freeDeductionMap[r.key] ?? false
                       const freeLimit = currentDetail.missing_clock_free_limit ?? 3
                       const freeUsed = getEmployeeFreeUsed(r.employee_name)
-                      const freeDisabled = isLocked || (!checked && !free) || (checked && freeUsed >= freeLimit && !free)
+                      const freeDisabled = (!checked && !free) || (checked && freeUsed >= freeLimit && !free)
                       return (
                         <tr key={r.key} className={free ? 'bg-amber-50' : checked ? 'bg-green-50' : 'hover:bg-slate-50'}>
                           <td className="px-4 py-3 text-center">
@@ -644,8 +626,7 @@ export function ConfirmationPage() {
                               type="checkbox"
                               checked={checked}
                               onChange={() => toggleConfirm(r.key)}
-                              disabled={isLocked}
-                              className={`h-5 w-5 rounded border-slate-300 text-brand-600 ${isLocked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
+                              className="h-5 w-5 cursor-pointer rounded border-slate-300 text-brand-600"
                             />
                           </td>
                           <td className="px-4 py-3 text-slate-700">{r.work_date}</td>
@@ -669,7 +650,7 @@ export function ConfirmationPage() {
                                   : freeDisabled
                                   ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
                                   : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
-                              } ${isLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
+                              }`}
                               disabled={freeDisabled}
                               onClick={() => handleFreeDeduction(r.key)}
                               title={free ? '点击取消免打卡' : `免打卡机会剩余：${freeLimit - freeUsed}次`}

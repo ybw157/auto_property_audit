@@ -40,6 +40,12 @@ def save_report(
     file_path: str,
     created_at: str,
 ) -> int:
+    """登记一份已生成的报告（按 report_type 去重：同类型重复生成只保留最新一条）。
+
+    注意：`report_type` 由 pdf_report 生成时已带上服务类型前缀（如「保安考勤明细」/
+    「保洁考勤明细」），因此同一 (项目, 业态, 月份) 下不同服务类型的报告会落到
+    不同的删除键上，可以同时存在、互不覆盖。
+    """
     conn = _conn()
     try:
         conn.execute(

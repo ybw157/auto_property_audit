@@ -25,7 +25,7 @@ export function ServiceTypeTabs({ options, value, onChange, disabled }: Props) {
             key={opt.value}
             type="button"
             disabled={disabled}
-            title={opt.hasResult ? (opt.locked ? '已锁定' : '已有审核结果') : '暂无审核结果'}
+            title={opt.hasResult ? '已有审核结果' : '暂无审核结果'}
             onClick={() => onChange(opt.value)}
             className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
               active
@@ -34,9 +34,7 @@ export function ServiceTypeTabs({ options, value, onChange, disabled }: Props) {
             } ${disabled ? 'cursor-not-allowed opacity-50' : ''}`}
           >
             <span>{opt.label}</span>
-            {opt.locked ? (
-              <span className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-white' : 'bg-slate-400'}`} />
-            ) : opt.hasResult ? (
+            {opt.hasResult ? (
               <span className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-white' : 'bg-blue-500'}`} />
             ) : (
               <span className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-white/50' : 'bg-slate-300'}`} />

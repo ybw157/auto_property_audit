@@ -1,7 +1,8 @@
 """项目 Excel 解析器 — 将项目考勤表解析为 PositionInfo / Position 模型。
 
 表格结构（3 个 Sheet）：
-  1. 基础信息      → 项目名称、业态、外包公司、约定/实际岗位数
+  1. 基础信息      → 业态、外包公司、约定/实际岗位数
+                     （不含项目名称：项目名一律取自登录用户，不从 Excel 解析）
   2. 合同编制表    → 每个岗位的编制信息（人员、工时、单价等）
   3. 排班表(排班情况) → 每个岗位每天排了谁（槽位级，含休息/缺岗/人名三态）
                        排班表是岗位表的子表，解析后挂到对应 Position.slots 上。
@@ -90,7 +91,7 @@ def parse_project_excel(
     path: str | Path,
     audit_month: str = "",
     service_type: str = "",
-    force_project_name: str = "",
+    project_name: str = "",
 ) -> list[PositionInfo]:
     """解析项目考勤表，返回 PositionInfo 列表（一个业态一个）。
 
@@ -101,7 +102,9 @@ def parse_project_excel(
         path:         项目考勤表路径。
         audit_month:  审核月份 'YYYY-MM'（优先于从文件名推断；真实流程里由 AI 审核页选择决定）。
         service_type: 服务类型（保安/保洁），原样写入 PositionInfo.service_type。
-        force_project_name: 项目名称，一律取自登录用户（调用方传入），不在本函数内从 Excel 读取。
+        project_name: 项目名称，一律取自登录用户信息（调用方传入），原样写入
+                      PositionInfo.project_name。本函数**不解析** Excel 里的项目名，
+                      也**不做**任何兜底或替换。
     """
     wb = load_workbook(str(path), data_only=True)
     sheet_names = wb.sheetnames
@@ -109,11 +112,11 @@ def parse_project_excel(
     service_type = service_type or ""
 
     # --- 1. 解析基础信息 ---
-    info_sheet = _find_sheet(sheet_names, wb, ["基础信息", "项目基础信息", "Sheet1"])
+    info_sheet = _find_sheet(sheet_names, wb, ["基础信息", "项目基础信息", "Sheet1"], require=True)
     base_info_list = _parse_base_info(info_sheet)
 
     # --- 2. 解析合同编制表 ---
-    contract_sheet = _find_sheet(sheet_names, wb, ["合同编制表", "编制表", "Sheet2"])
+    contract_sheet = _find_sheet(sheet_names, wb, ["合同编制表", "编制表", "Sheet2"], require=True)
     contract_positions = _parse_contract_positions(contract_sheet)
 
     # --- 3. 按业态聚合 ---
@@ -125,7 +128,7 @@ def parse_project_excel(
         positions = [p for bt, p in contract_positions if bt == biz_type]
 
         position_info = PositionInfo(
-            project_name=force_project_name,
+            project_name=project_name,
             business_type=biz_type,
             service_type=service_type,
             supplier=info["supplier"],
@@ -356,14 +359,24 @@ def _parse_day_header(h) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _find_sheet(sheet_names: list[str], wb, aliases: list[str]):
-    """按别名查找 Sheet。"""
+def _find_sheet(sheet_names: list[str], wb, aliases: list[str], require: bool = False):
+    """按别名查找 Sheet。
+
+    require=True（基础信息 / 合同编制表）时，若没有任何 Sheet 名命中别名，**直接报错**，
+    不再静默回退到第一个 Sheet —— 旧逻辑会把错误的表当成基础信息/编制表解析出
+    几十行垃圾（如江宁模板三张 sheet 名都不匹配，被当成同一张表解析出 31 行垃圾）。
+    require=False（排班表可选缺失）时返回 None，由调用方决定如何处理。
+    """
     for name in sheet_names:
         for alias in aliases:
             if alias in name:
                 return wb[name]
-    # fallback: 返回第一个 sheet
-    return wb[sheet_names[0]]
+    if require:
+        raise ValueError(
+            f"未找到包含以下任一名称的工作表：{aliases}。"
+            "请确认 Excel 的工作表命名为「基础信息 / 合同编制表 / 排班表」等规范名称。"
+        )
+    return None
 
 
 def _safe_float(value, default=0.0) -> float:
@@ -397,15 +410,17 @@ def _detect_base_columns(headers: list[str]) -> dict[str, int]:
     把实际岗数当约定岗数），重则直接抛 IndexError: tuple index out of range。
 
     优先精确关键词，其次模糊关键词（与 _detect_contract_columns 保持同一思路）。
+
+    注意：基础信息表里的「项目名称」列**不识别**（曾经会映射为 project_name）。
+    项目名一律取自登录用户信息，表格里的项目名（常写成「XX投资管理有限公司」全称）
+    既不读也不用，避免与登录账号绑定的项目名不一致。
     """
     col_map: dict[str, int] = {}
     for i, h in enumerate(headers):
         h_lower = _safe_str(h).replace(" ", "").replace("（", "(").replace("）", ")")
         if not h_lower:
             continue
-        if "项目名称" in h_lower:
-            col_map.setdefault("project_name", i)
-        elif "业态" in h_lower or "业务类型" in h_lower:
+        if "业态" in h_lower or "业务类型" in h_lower:
             col_map.setdefault("business_type", i)
         elif "外包" in h_lower or "服务公司" in h_lower or "供应商" in h_lower:
             col_map.setdefault("supplier", i)
@@ -434,35 +449,47 @@ def _parse_base_info(ws) -> list[dict]:
         合同开始, 合同结束, 合同约定岗位数, 实际在岗岗位数, 合同金额(月)
 
     两套模板列数不同，因此一律按表头自动识别列位置；
-    仅当表头无法识别时才回退到旧版固定下标，且越界返回默认值（不再崩溃）。
+    关键列（业态 / 约定岗位数 / 实际岗位数）识别不到时直接报错，不再静默回退到固定下标。
+
+    首列「项目名称」不参与解析（项目名只来自登录用户），因此不再用它判断
+    数据行是否有效；是否有效改由「业态非空且约定/实际岗位数至少一项 > 0」决定，
+    空白行与合计行会被这条规则自然跳过。
     """
     all_rows = list(ws.iter_rows(values_only=True))
     if not all_rows:
         return []
     col_map = _detect_base_columns([_safe_str(v) for v in all_rows[0]])
 
-    if "contracted_count" not in col_map or "actual_count" not in col_map:
-        # 表头无法识别（非常规模板）：回退旧版保洁 10 列固定布局
-        print(
-            "[解析警告] 基础信息表未能识别「合同约定岗位数/实际在岗岗位数」列，"
-            "回退按旧版固定列解析；若结果异常请检查表头命名。"
+    # 基础信息表的关键列（业态 / 合同约定岗位数 / 实际在岗岗位数）是定位键与岗位数的
+    # 唯一来源，必须能从表头识别出来；识别不到即报错，不再静默回退到固定下标
+    # （旧版硬编码下标会把标题行当数据、把「合同开始」当「外包公司」，产出垃圾行）。
+    missing_base = [
+        label
+        for key, label in (
+            ("business_type", "业态"),
+            ("contracted_count", "合同约定岗位数"),
+            ("actual_count", "实际在岗岗位数"),
         )
-    idx_project = col_map.get("project_name", 0)
-    idx_biz = col_map.get("business_type", 1)
-    idx_supplier = col_map.get("supplier", 4)
-    idx_contracted = col_map.get("contracted_count", 7)
-    idx_actual = col_map.get("actual_count", 8)
+        if key not in col_map
+    ]
+    if missing_base:
+        raise ValueError(
+            "基础信息表缺少必需的列：" + "、".join(missing_base) +
+            "。请核对表头命名（如「业态」「保洁外包公司」「合同约定岗位数」「实际在岗岗位数」）。"
+        )
+    idx_biz = col_map["business_type"]
+    idx_supplier = col_map.get("supplier")
+    idx_contracted = col_map["contracted_count"]
+    idx_actual = col_map["actual_count"]
 
     rows = all_rows[1:]
     result = []
     last_supplier = ""
     for row in rows:
-        # 仅用首列判断是否有效数据行；项目名称一律由调用方（登录用户）决定，
-        # 不再从 Excel 基础信息表读取，避免「泰州金鹰天地投资管理有限公司」等全称
-        # 与登录用户项目名（如「泰州金鹰天地」）不一致导致与 contract/BI 对不上。
-        first_cell = _safe_str(_row_get(row, idx_project, ""))
-        if not first_cell:
-            continue
+        # 项目名称一律由调用方（登录用户）决定，不从 Excel 基础信息表读取，
+        # 避免「泰州金鹰天地投资管理有限公司」等全称与登录用户项目名
+        # （如「泰州金鹰天地」）不一致导致与 contract/BI 对不上；
+        # 因此这里不再读首列，有效性由「业态 + 岗位数」判断。
         contracted = _safe_float(_row_get(row, idx_contracted, 0))
         actual = _safe_float(_row_get(row, idx_actual, 0))
         business_type = _safe_str(_row_get(row, idx_biz, ""))
@@ -510,13 +537,14 @@ def _detect_contract_columns(headers: list[str]) -> dict[str, int]:
     之所以要区分，是因为两种表头都含"单价"子串；若用模糊的 `"单价" in h`
     统一处理，"岗位单价（月/元）"（列序靠后）会覆盖"工时单价"，把月单价
     （如 5400）当成时薪，导致缺岗/缺勤扣款被放大数十~数百倍。
+
+    注意：编制表里的「项目名称」列**不识别**。项目名一律取自登录用户信息，
+    表格里即使有该列也不读，避免全称/简称不一致造成归属错乱。
     """
     col_map: dict[str, int] = {}
     for i, h in enumerate(headers):
         h_lower = h.replace(" ", "").replace("（", "(").replace("）", ")")
-        if "项目名称" in h_lower:
-            col_map["project_name"] = i
-        elif "业态" in h_lower:
+        if "业态" in h_lower:
             col_map["business_type"] = i
         elif "岗位名称" in h_lower:
             col_map["position_name"] = i
@@ -579,8 +607,21 @@ def _parse_contract_positions(ws) -> list[tuple[str, Position]]:
             "请确认 Excel 是否缺少时薪列，或表头命名是否规范。"
         )
 
-    pos_name_idx = col_map.get("position_name", 2)
-    biz_idx = col_map.get("business_type", 1)
+    # 合同编制表的关键列（岗位名称 / 业态）是岗位定位与业态聚合的唯一来源，
+    # 必须能从表头识别；识别不到即报错，不再静默回退到固定下标
+    # （旧版硬编码会把表头行当岗位数据，产出「岗位名称=岗位名称」的幽灵岗位）。
+    if "position_name" not in col_map or "business_type" not in col_map:
+        missing = []
+        if "position_name" not in col_map:
+            missing.append("岗位名称")
+        if "business_type" not in col_map:
+            missing.append("业态")
+        raise ValueError(
+            "合同编制表缺少必需的列：" + "、".join(missing) +
+            "。请核对表头命名（如「岗位名称」「业态」）。"
+        )
+    pos_name_idx = col_map["position_name"]
+    biz_idx = col_map["business_type"]
 
     rows = all_rows[1:]
     positions = []

@@ -43,6 +43,25 @@ const tabColumns: Record<string, string[]> = {
   deductions: ['summary_item', 'deduction_amount'],
 }
 
+type ConfirmState = { confirmed?: boolean; free_deduction?: boolean }
+
+/** 异常确认键：{类型}|{员工}|{日期}[|{窗口}]（与后端 audit_common.confirm_key 同格式）。 */
+function exceptionConfKey(type: string, emp: string, date: string, window = ''): string {
+  return window ? `${type}|${emp}|${date}|${window}` : `${type}|${emp}|${date}`
+}
+
+/** 唯一「计入」规则（与后端 audit_common.is_charged 完全一致）：
+ *  未标记免扣 且 未被显式取消确认 → 计入扣款。
+ *  审核刚完成时结果里还没有 confirmations，因此默认全部计入。 */
+function isChargedConf(conf: ConfirmState | undefined): boolean {
+  if (!conf) return true
+  return (conf.confirmed ?? true) && !conf.free_deduction
+}
+
+function detailConfirmations(d: Record<string, unknown>): Record<string, ConfirmState> {
+  return (d.confirmations || {}) as Record<string, ConfirmState>
+}
+
 export function AuditResults() {
   const { auditContext, setAuditContext } = useAuditContext()
   const { projectName: userProjectName } = useAuth()
@@ -141,10 +160,12 @@ export function AuditResults() {
       }))
     }
     if (tabKey === 'attendance-details') {
+      // 只渲染「计入扣款」的异常：与定稿金额、PDF 报告同一条规则
       const rows: Record<string, unknown>[] = []
       for (const d of parsed.deductionDetails) {
         const empName = String(d.employee_name || '')
         const position = String(d.position || '')
+        const confs = detailConfirmations(d)
         const missingDates = Array.isArray(d.missing_clock_dates) ? d.missing_clock_dates as string[] : []
         const absenceDates = Array.isArray(d.absence_dates) ? d.absence_dates as string[] : []
         const lateDetails = Array.isArray(d.late_details) ? d.late_details as Record<string, unknown>[] : []
@@ -154,21 +175,32 @@ export function AuditResults() {
         const absenceMultiplier = Number(d.absence_multiplier || 2.5)
 
         for (const date of missingDates) {
+          if (!isChargedConf(confs[exceptionConfKey('missing_clock', empName, date)])) continue
           rows.push({ employee_name: empName, position, work_date: date, exception_type: '漏打卡', deduction_amount: 0 })
         }
         for (const mi of midIssues) {
-          rows.push({ employee_name: empName, position, work_date: mi.date || '', exception_type: '漏打卡', deduction_amount: 0, detail: `中间卡缺失 ${mi.window || ''} 应打${mi.required || 0}次实打${mi.actual || 0}次` })
+          const date = String(mi.date || '')
+          const window = String(mi.window || '')
+          const conf = confs[exceptionConfKey('missing_clock', empName, date, window)]
+            || confs[exceptionConfKey('mid_clock', empName, date, window)]
+          if (!isChargedConf(conf)) continue
+          rows.push({ employee_name: empName, position, work_date: date, exception_type: '漏打卡', deduction_amount: 0, detail: `中间卡缺失 ${window} 应打${mi.required || 0}次实打${mi.actual || 0}次` })
         }
         for (const date of absenceDates) {
+          if (!isChargedConf(confs[exceptionConfKey('absence', empName, date)])) continue
           const absenceAmount = Number((absenceDailyRate * absenceMultiplier).toFixed(2))
           rows.push({ employee_name: empName, position, work_date: date, exception_type: '缺勤', deduction_amount: absenceAmount, detail: `日服务费${absenceDailyRate}元×${absenceMultiplier}` })
         }
         for (const ld of lateDetails) {
           const lateAmount = Number((Number(ld.amount) || 0).toFixed(2))
+          if (lateAmount <= 0) continue  // S04-1 迟到>60min 已转漏打卡，不渲染文档行
+          if (!isChargedConf(confs[exceptionConfKey('late', empName, String(ld.date || ''))])) continue
           rows.push({ employee_name: empName, position, work_date: ld.date || '', exception_type: '迟到', deduction_amount: lateAmount, detail: `迟到${ld.minutes || 0}分钟` })
         }
         for (const ed of earlyDetails) {
           const earlyAmount = Number((Number(ed.amount) || 0).toFixed(2))
+          if (earlyAmount <= 0) continue  // S04-1 早退>60min 已转漏打卡，不渲染文档行
+          if (!isChargedConf(confs[exceptionConfKey('early_leave', empName, String(ed.date || ''))])) continue
           rows.push({ employee_name: empName, position, work_date: ed.date || '', exception_type: '早退', deduction_amount: earlyAmount, detail: `早退${ed.minutes || 0}分钟` })
         }
       }
@@ -178,11 +210,11 @@ export function AuditResults() {
       return parsed.deductionDetails.map((d) => ({
         employee_name: d.employee_name || '',
         position: d.position || '',
-        missing_clock_count: d.missing_clock_count ?? 0,
+        missing_clock_count: Number(d.missing_clock_count || 0),
         missing_clock_free_limit: d.missing_clock_free_limit ?? 0,
-        late_count: Array.isArray(d.late_details) ? (d.late_details as unknown[]).length : 0,
-        early_leave_count: Array.isArray(d.early_leave_details) ? (d.early_leave_details as unknown[]).length : 0,
-        absence_count: d.absence_count ?? (Array.isArray(d.absence_dates) ? (d.absence_dates as unknown[]).length : 0),
+        late_count: Number(d.late_count || 0),
+        early_leave_count: Number(d.early_leave_count || 0),
+        absence_count: Number(d.absence_count || 0),
         absence_daily_rate: Number(d.absence_daily_rate || 0),
         total_deduction: Number(d.total_deduction || 0),
         overtime_count: Array.isArray(d.overtime_warnings) ? d.overtime_warnings.length : 0,
@@ -285,22 +317,6 @@ export function AuditResults() {
     setProofUpdating('')
   }
 
-  async function confirmFinal() {
-    if (!auditContext) return
-    try {
-      const params = new URLSearchParams({
-        project_name: projectName,
-        business_type: businessType,
-        audit_month: auditMonth,
-        service_type: effectiveServiceType,
-      })
-      await request(`/api/v2/audit-results/confirm?${params}`, { method: 'POST' })
-      setMessage('审核结果已确认并锁定')
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : '确认失败')
-    }
-  }
-
   const activeOption = serviceTypeOptions.find((o) => o.value === activeServiceType)
   const isServiceTypeUnaudited = activeOption ? !activeOption.hasResult : false
 
@@ -325,8 +341,6 @@ export function AuditResults() {
     )
   }
 
-  const isLocked = detailData ? Boolean((detailData as Record<string, unknown>).locked) : false
-
   return (
     <div className="space-y-5">
       <div className="card p-5">
@@ -335,10 +349,11 @@ export function AuditResults() {
             <h2 className="text-base font-semibold text-slate-900">审核确认</h2>
             <p className="mt-1 text-sm text-slate-500">
               {projectName} {auditMonth} {businessType ? `· ${businessType}` : ''}{effectiveServiceType ? ` · ${effectiveServiceType}` : ''} · 版本 {String(detailData?.version ?? '-')}
-              {isLocked ? ' · 已锁定' : ''}
             </p>
           </div>
-          <button className="btn-primary" disabled={isLocked} onClick={confirmFinal}>{isLocked ? '已确认' : '确认最终版'}</button>
+          <span className={`rounded-full px-3 py-1 text-xs font-medium ${String(detailData?.status || '') === '已确认' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+            {String(detailData?.status || '已审核')}
+          </span>
         </div>
         <ServiceTypeTabs options={serviceTypeOptions} value={activeServiceType} onChange={setActiveServiceType} />
         {message && <div className="mt-3 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">{message}</div>}
@@ -715,7 +730,7 @@ function buildDashboardView(data: DashboardData) {
     return s !== '休息' && s !== '请假'
   }).length
   // 异常记录数 = 从 deduction_details 逐项累加（漏打卡+中间卡+迟到+早退+缺勤）
-  // 与 GitHub 版本和后端 finalize 同口径
+  // 与后端异常确认同口径
   const exceptionCount = data.deductionDetails.reduce((sum, d) => {
     const missingClockDates = Array.isArray(d.missing_clock_dates) ? d.missing_clock_dates.length : 0
     const midClockIssues = Array.isArray(d.mid_clock_issues) ? d.mid_clock_issues.length : 0
@@ -724,7 +739,7 @@ function buildDashboardView(data: DashboardData) {
     const absenceDates = Array.isArray(d.absence_dates) ? d.absence_dates.length : 0
     return sum + missingClockDates + midClockIssues + lateDetails + earlyLeaveDetails + absenceDates
   }, 0)
-  // 异常率 = 异常记录数 / 排班任务数（与 AiAudit 进度条 / 后端 finalize 同口径）
+  // 异常率 = 异常记录数 / 排班任务数（与 AiAudit 进度条 / 后端异常确认同口径）
   const firstExceptionRate = scheduleTaskCount > 0
     ? Number(((exceptionCount / scheduleTaskCount) * 100).toFixed(1))
     : 0

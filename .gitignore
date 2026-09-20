@@ -26,3 +26,9 @@ frontend/dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# 其他
+*.log
+tools/
+
+

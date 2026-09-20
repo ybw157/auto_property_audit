@@ -75,9 +75,15 @@ class Position:
 
 class PositionInfo(Base):
     __tablename__ = "position_infos"
-    # 同一 (项目, 业态, 月份) 下保安与保洁各存一份排班，故定位键必须包含 service_type
+    # 定位键 = (项目, 业态, 月份, 服务类型)：同一 (项目, 业态, 月份) 下保安与保洁
+    # 各存一份排班，少任一列都会让后上传的那份覆盖先上传的那份。
+    # 索引名与 core/database.py 的 _migrate_position_service_type 保持一致，
+    # 保证「新建库」与「存量库迁移」得到同一把唯一键。
     __table_args__ = (
-        UniqueConstraint("project_name", "business_type", "audit_month", "service_type"),
+        UniqueConstraint(
+            "project_name", "business_type", "audit_month", "service_type",
+            name="uk_position_scope",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True) #主键

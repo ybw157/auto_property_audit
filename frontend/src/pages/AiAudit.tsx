@@ -8,6 +8,21 @@ import { useAuditContext } from '../hooks/useAuditContext'
 type FileKind = 'project'
 type MasterProject = { project_name: string; project_code: string }
 
+/**
+ * 服务类型只有保安 / 保洁两类，下拉**不提供「全部服务类型」选项**：
+ * 服务类型是 (项目, 业态, 月份, 服务类型) 定位键的第四列，必须由用户明确选择，
+ * 留空会让保安与保洁落到同一条记录上互相覆盖。
+ */
+const SERVICE_TYPES = ['保安', '保洁'] as const
+
+/** /api/v2/positions/upload 的返回：project_name 来自登录用户信息 */
+type UploadResult = {
+  project_name: string
+  audit_month: string
+  bi_month: string
+  service_type: string
+}
+
 type StartAuditResult = {
   project_name: string
   business_type: string
@@ -63,15 +78,29 @@ export function AiAudit() {
       .catch(() => {})
   }, [])
 
-  // 业态随登录项目自动映射：项目唯一业态直接选中，无业态或无映射时清空为“全部业态”
+  // 业态随登录项目自动映射：唯一业态直接选中，多业态需用户自选（不保留其他项目的选择）
   useEffect(() => {
     const mapped = businessTypeMapping[selectedProjectName] || []
-    if (mapped.length === 0) {
-      setBusinessType('')
-    } else if (mapped.length === 1) {
-      setBusinessType(mapped[0])
-    }
+    setBusinessType((current) => {
+      if (mapped.length === 0) return ''
+      if (mapped.length === 1) return mapped[0]
+      // 多业态：仅当已选项仍属于当前项目时保留，否则清空等待用户选择
+      return mapped.includes(current) ? current : ''
+    })
   }, [selectedProjectName, businessTypeMapping])
+
+  /**
+   * AI 审核页全部选项均为必填：任一项缺失都直接拦截并提示，不提交半截参数。
+   * 项目 / 审核月 / 业态 / 服务类型是定位键的组成，服务端也会硬校验。
+   */
+  function validateRequired(): string {
+    if (!selectedProjectName) return '请先选择项目。项目来自系统配置里的项目合同库，请先上传并启用项目合同。'
+    if (!auditMonth) return '请选择审核月份。不同月份天数不同，会影响月度审核和报告统计。'
+    if (!businessType) return '请选择审核业态。不同业态对应不同合同，选择后仅审核该业态的排班和考勤。'
+    if (!serviceType) return '请选择服务类型（保安／保洁）。服务类型是定位键的一部分，留空会导致保安与保洁数据互相覆盖。'
+    if (!projectFile) return '请先选择项目基础资料.xlsx'
+    return ''
+  }
 
   function isExcel(file: File) {
     return file.name.toLowerCase().endsWith('.xlsx')
@@ -80,6 +109,8 @@ export function AiAudit() {
   async function resubmitSchedule() {
     if (!batchId) return setMessage('请先选择或完成一个批次，再重新提交排班')
     if (!projectFile) return setMessage('请选择修改后的项目基础资料.xlsx')
+    const missing = validateRequired()
+    if (missing) return setMessage(missing)
     setLoading(true)
     try {
       await request('/api/v2/positions/upload', { method: 'POST', body: buildUploadForm(projectFile) })
@@ -100,22 +131,31 @@ export function AiAudit() {
     }
   }
 
-  // 上传排班表时把「选择审核月」「选择服务类型」的选中值一并提交：
-  // 岗位信息表的月份与服务类型必须取自这两个控件，服务端不再从文件名/Sheet 名推断。
+  // 上传排班表时把「选择项目」「选择审核月」「选择服务类型」的选中值一并提交：
+  // 岗位信息表的月份与服务类型必须取自这两个控件，服务端不再从文件名/Sheet 名推断；
+  // 项目名由服务端按登录身份决定 —— 普通账号强制用绑定项目（忽略此处传值），
+  // 管理员账号无绑定项目、必须显式传 project_name 指明写入哪个项目（否则会 400）。
   function buildUploadForm(file: File) {
     const form = new FormData()
     form.append('file', file)
+    form.append('project_name', selectedProjectName)
     form.append('audit_month', auditMonth)
     form.append('service_type', serviceType)
     return form
   }
 
   async function autoUploadProject(file: File) {
+    // 上传接口要求项目、审核月、服务类型齐全（缺任一都会 400）。
+    // 这里先把文件留在页面上，等用户补齐选项后再由「开始AI审核」上传，
+    // 避免先落盘一份没有归属的编制表。
+    if (!selectedProjectName) return setMessage('请先选择项目，再上传项目基础资料.xlsx')
+    if (!auditMonth) return setMessage('请先选择审核月份，再上传项目基础资料.xlsx')
+    if (!serviceType) return setMessage('请先选择服务类型（保安／保洁），再上传项目基础资料.xlsx')
     setLoading(true)
     try {
-      await request('/api/v2/positions/upload', { method: 'POST', body: buildUploadForm(file) })
+      const result = await request<UploadResult>('/api/v2/positions/upload', { method: 'POST', body: buildUploadForm(file) })
       setUploaded(true)
-      setMessage(`项目基础资料已上传：${file.name}（审核月 ${auditMonth.replace('-', '')}／服务类型 ${serviceType || '未指定'}），可点击「开始AI审核」发起审核。`)
+      setMessage(`项目基础资料已上传：${file.name}（项目 ${result.project_name}／审核月 ${result.audit_month}／服务类型 ${result.service_type}），可点击「开始AI审核」发起审核。`)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '上传失败')
     } finally {
@@ -189,16 +229,15 @@ export function AiAudit() {
   }
 
   async function createAndUpload() {
-    if (!selectedProjectName) return setMessage('请先选择项目。项目来自系统配置里的项目合同库，请先上传并启用项目合同。')
-    if (!auditMonth) return setMessage('请选择审核月份。不同月份天数不同，会影响月度审核和报告统计。')
-    if (!projectFile) return setMessage('请先选择项目基础资料')
+    const missing = validateRequired()
+    if (missing) return setMessage(missing)
+    if (!projectFile) return setMessage('请先选择项目基础资料.xlsx')
     setLoading(true)
     try {
-      // 若尚未上传，先上传再审核
+      // 若尚未上传，先上传再审核：与自动上传共用 buildUploadForm，
+      // 保证审核月 / 服务类型不会漏传（服务端缺任一即 400）
       if (!uploaded) {
-        const form = new FormData()
-        form.append('file', projectFile)
-        await request('/api/v2/positions/upload', { method: 'POST', body: form })
+        await request<UploadResult>('/api/v2/positions/upload', { method: 'POST', body: buildUploadForm(projectFile) })
         setUploaded(true)
       }
       const auditMonthFormatted = auditMonth.replace('-', '')
@@ -274,19 +313,23 @@ export function AiAudit() {
           <div className="mt-4">
             <label className="block text-sm font-medium text-slate-700">选择审核业态</label>
             <select className="input mt-2 w-full" value={businessType} onChange={(event) => setBusinessType(event.target.value)}>
-              <option value="">全部业态</option>
+              <option value="" disabled>请选择业态</option>
               {(businessTypeMapping[selectedProjectName] || []).map((bt) => (
                 <option key={bt} value={bt}>{bt}</option>
               ))}
             </select>
             <p className="mt-2 text-xs text-slate-500">不同业态对应不同合同。选择后仅审核该业态的排班和考勤。</p>
+            {selectedProjectName && (businessTypeMapping[selectedProjectName] || []).length === 0 && (
+              <p className="mt-2 text-xs text-amber-600">该项目未配置业态，请联系管理员在系统配置中补充后再审核。</p>
+            )}
           </div>
           <div className="mt-4">
             <label className="block text-sm font-medium text-slate-700">选择服务类型</label>
             <select className="input mt-2 w-full" value={serviceType} onChange={(event) => setServiceType(event.target.value)}>
-              <option value="">全部服务类型</option>
-              <option value="保安">保安</option>
-              <option value="保洁">保洁</option>
+              <option value="" disabled>请选择服务类型</option>
+              {SERVICE_TYPES.map((st) => (
+                <option key={st} value={st}>{st}</option>
+              ))}
             </select>
             <p className="mt-2 text-xs text-slate-500">不同服务类型对应不同合同。选择后仅审核该服务类型的排班和考勤。</p>
           </div>

@@ -9,7 +9,6 @@ export interface ServiceTypeOption {
   value: string
   label: string
   hasResult: boolean
-  locked: boolean
 }
 
 interface AuditResultListItem {
@@ -17,7 +16,6 @@ interface AuditResultListItem {
   business_type?: string
   audit_month?: string
   service_type?: string
-  locked?: number | boolean
 }
 
 /**
@@ -48,7 +46,7 @@ export function useServiceTypes(auditContext: AuditContext | null) {
     }
     let cancelled = false
     const params = new URLSearchParams({ project_name: projectName, audit_month: auditMonth })
-    request<AuditResultListItem[]>('/api/v2/audit-results', { method: 'GET' })
+    request<AuditResultListItem[]>(`/api/v2/audit-results?${params.toString()}`, { method: 'GET' })
       .then((list) => {
         if (cancelled) return
         const scoped = (list || []).filter(
@@ -58,11 +56,9 @@ export function useServiceTypes(auditContext: AuditContext | null) {
             String(it.business_type || '') === businessType
         )
         const hasMap = new Map<string, boolean>()
-        const lockedMap = new Map<string, boolean>()
         for (const it of scoped) {
           const svc = String(it.service_type || '')
           hasMap.set(svc, true)
-          if (it.locked) lockedMap.set(svc, true)
         }
         // 上下文里指定的服务类型即使没有结果也保留，避免用户看不到自己刚审核的类型
         if (auditContext?.service_type && !hasMap.has(auditContext.service_type)) {
@@ -84,7 +80,6 @@ export function useServiceTypes(auditContext: AuditContext | null) {
             value: v,
             label: v || '未指定',
             hasResult: hasMap.get(v) ?? false,
-            locked: lockedMap.get(v) ?? false,
           }))
         )
         setActive((cur) => {

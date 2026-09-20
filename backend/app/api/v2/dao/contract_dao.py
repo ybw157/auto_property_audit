@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.api.v2.core.database import get_db, now_text
+from app.api.v2.core.validators import require_service_type
 from app.api.v2.models.contract_models import ContractRecord
 
 
@@ -29,17 +30,22 @@ def get_latest_active_contract(
 ) -> ContractRecord | None:
     """取"最近更新"的那份启用合同，而不是列表顺序里的第一条。
 
+    服务类型必填：合同决定本次审核套用的扣款规则（漏打卡单价、缺编系数…），
+    若缺失后「不限服务类型」地挑一份，很容易把保洁合同的规则套到保安审核上。
+    因此服务类型缺失时直接报「缺少「服务类型」字段数据」，不挑、不回退。
+
     Args:
         project_name:   项目名（空=不限）
         business_type:  业态（空=不限）
-        service_type:   服务类型（空=不限，保安/保洁）
+        service_type:   服务类型（保安/保洁），必填
         require_rules:  True 时只考虑已解析出规则的合同
     """
+    service_type = require_service_type(service_type)
     candidates = [
         c for c in get_contracts(project_name, business_type)
         if getattr(c, "is_active", 0)
         and (not require_rules or bool(getattr(c, "rules", None)))
-        and (not service_type or getattr(c, "service_type", "") == service_type)
+        and getattr(c, "service_type", "") == service_type
     ]
     if not candidates:
         return None

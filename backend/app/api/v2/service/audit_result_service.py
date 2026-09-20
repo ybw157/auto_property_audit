@@ -5,6 +5,7 @@ from datetime import datetime
 from fastapi import HTTPException
 from app.api.v2.core.database import json_dumps, now_text
 from app.api.v2.core.result import Result
+from app.api.v2.core.validators import require_service_type
 from app.api.v2.dao import audit_result_dao, position_dao, bi_dao, contract_dao
 from app.api.v2.models.audit_result_models import AuditResult
 from app.api.v2.service.audit_slot_service import run_slot_audit
@@ -13,10 +14,20 @@ from app.api.v2.service.audit_attendance_service import (
     extract_s04_rules,
     get_absence_coefficient,
 )
-from app.api.v2.utils.audit_common import normalize_employee_name, parse_shift_by_weekday, get_shift_for_date, parse_time_value, time_to_minutes
+from app.api.v2.utils.audit_common import (
+    normalize_employee_name,
+    parse_shift_by_weekday,
+    get_shift_for_date,
+    parse_time_value,
+    time_to_minutes,
+    confirm_key,
+    mid_clock_confirm,
+    is_charged,
+    recompute_audit_totals,
+)
 
 
-def _load_active_s04_rules(project_name: str, business_type: str, service_type: str = ""):
+def _load_active_s04_rules(project_name: str, business_type: str, service_type: str):
     """返回启用合同的 S04 规则（同项目同业态同服务类型多份合同时，取"最近更新"的那份）。
 
     用于：槽位缺编扣款系数、S04 考勤管理规则读取。
@@ -264,12 +275,13 @@ def get_audit_result(
     project_name: str,
     business_type: str,
     audit_month: str,
-    service_type: str = "",
+    service_type: str,
 ) -> dict:
-    """获取审核结果。"""
+    """获取审核结果（按四列定位键，服务类型必填）。"""
+    service_type = require_service_type(service_type)
     result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
-        raise HTTPException(status_code=404, detail="未找到审核结果")
+        raise HTTPException(status_code=404, detail=f"未找到「{service_type}」的审核结果")
     return result.to_dict()
 
 
@@ -278,7 +290,7 @@ def list_audit_results(
     audit_month: str = "",
     business_type: str = "",
 ) -> list[dict]:
-    """获取审核结果列表。"""
+    """列出审核结果：列表查询不走定位键，保持列出全部服务类型（供前端做子分类导航）。"""
     results = audit_result_dao.list_audit_results(project_name, audit_month, business_type)
     return [r.to_dict() for r in results]
 
@@ -291,8 +303,12 @@ def start_audit(
 ) -> dict:
     """开始审核：加载岗位(含排班槽位) + 同项目 BI 考勤，跑槽位级三源审核并落库。
 
+    服务类型是 (项目, 业态, 月份, 服务类型) 定位键的第四列，**必填**：
+    缺失时直接报「缺少「服务类型」字段数据」，不做分支判断、不回退到空值或另一类服务。
+
     返回统一 Result 结构：{ code, message, data }。
     """
+    service_type = require_service_type(service_type)
 
     print(f"\n{'='*60}")
     print(f"[审核开始] project_name={project_name}, business_type={business_type}, service_type={service_type}, audit_month={audit_month}")
@@ -305,21 +321,41 @@ def start_audit(
     # service_type 必须参与岗位定位：同一 (项目, 业态, 月份) 下保安与保洁各存一份排班，
     # 否则选「保安」审核会加载保洁的排班，审核结果内容全是保洁岗人员。
     position_info = position_dao.get_position_info(
-        project_name, business_type, audit_month, service_type or ""
+        project_name, business_type, audit_month, service_type
     )
     if position_info is None or not position_info.positions:
-        # 区分三种失败原因，避免"数据已上传、只是业态选错"时误导用户反复重新上传
+        # 区分失败原因，精准提示用户下一步操作（绝不回退取用另一类服务的数据）
         if position_info is not None:
             # 记录存在但岗位列表为空 → Excel 解析出的岗位数为 0
-            print(f"  - [岗位缺失] 业态 {business_type!r} 有记录但岗位列表为空（解析结果为空）")
+            print(f"  - [岗位缺失] 业态 {business_type!r}/{service_type!r} 有记录但岗位列表为空（解析结果为空）")
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"业态「{business_type}」的岗位数据存在，但岗位列表为空，"
+                    f"业态「{business_type}」服务类型「{service_type}」的岗位数据存在，但岗位列表为空，"
                     "通常是 Excel 的「合同编制表」未被正确解析。"
                     "请重新上传岗位/排班 Excel，并核对岗位名称列、业态列是否填写规范。"
                 ),
             )
+        # position_info 为 None → 该定位键下无匹配行，先查该范围下已有哪些服务类型
+        available_sts = position_dao.list_service_types_for_scope(
+            project_name, business_type, audit_month
+        )
+        if available_sts:
+            print(
+                f"  - [服务类型不匹配] service_type={service_type!r} 无数据；"
+                f"该项目 {audit_month} {business_type!r} 下已有的服务类型为: {available_sts}"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"该项目 {audit_month}「{business_type}」业态下仅有 "
+                    f"{'、'.join(available_sts)} 的岗位数据，"
+                    f"未找到「{service_type}」的排班记录。\n"
+                    f"请先在「AI 审核」页面上传「{service_type}」的岗位编制 Excel，"
+                    f"上传时务必在「选择服务类型」下拉框中选择「{service_type}」。"
+                ),
+            )
+        # 该范围下完全没数据 → 继续查其他业态
         uploaded_types = position_dao.list_uploaded_business_types(project_name, audit_month)
         if uploaded_types:
             print(
@@ -450,8 +486,10 @@ def start_audit(
 
     # 6) 落库（UPSERT）
     print(f"\n[步骤6] 落库...")
-    # 去掉项目名称中的"项目"二字，保持数据一致性
-    project_name = project_name.replace("项目", "") if project_name else ""
+    # 项目名称一律取其原始值（与上传编制表时写入 position_infos 的项目名完全一致），
+    # 不再做「去掉"项目"二字」的替换 —— 旧逻辑会把落库名（如"长春金鹰世界"）与
+    # 查询/比对用的原值（如"长春金鹰世界项目"）折成两把键：既让版本号永不递增，
+    # 又使审核结果行与编制表行对不上。现在两侧统一用登录用户绑定的原始项目名。
     new_version = (result.version + 1) if result else 1
     out = AuditResult(
         project_name=project_name,
@@ -505,26 +543,45 @@ def start_audit(
     ).to_dict()
 
 
-def confirm_audit(
-    project_name: str,
-    business_type: str,
-    audit_month: str,
-    confirmed_by: str,
-    service_type: str = "",
-) -> dict:
-    """确认审核结果（记录确认人/确认时间，不再上锁，可重复确认）。"""
-    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
-    if not result:
-        raise HTTPException(status_code=404, detail="未找到审核结果")
-
-    audit_result_dao.update_audit_result_fields(
-        project_name, business_type, audit_month,
-        service_type=service_type,
-        confirmed_by=confirmed_by,
-        confirmed_at=now_text(),
-        status="已确认",
+def audit_totals_metrics(data: dict) -> dict:
+    """返回定稿摘要（总扣款/涉及人数/确认条数/两次异常率），全部取自同一份结果。"""
+    s04 = data.get("s04_attendance_audit", {}) or {}
+    details = s04.get("deduction_details", []) or []
+    schedule_task_count = sum(
+        1 for d in (data.get("slot_details") or []) if d.get("status") not in ("休息", "请假")
     )
-    return {"message": "审核结果已确认"}
+
+    exception_count = 0
+    charged_count = 0
+    for detail in details:
+        emp = detail.get("employee_name", "")
+        confs = detail.get("confirmations", {}) or {}
+        entries: list[dict] = []
+        for d in detail.get("missing_clock_dates", []) or []:
+            entries.append(confs.get(confirm_key("missing_clock", emp, d), {}))
+        for issue in detail.get("mid_clock_issues", []) or []:
+            entries.append(mid_clock_confirm(confs, emp, issue.get("date", ""), issue.get("window", "")))
+        for late in detail.get("late_details", []) or []:
+            entries.append(confs.get(confirm_key("late", emp, late.get("date", "")), {}))
+        for early in detail.get("early_leave_details", []) or []:
+            entries.append(confs.get(confirm_key("early_leave", emp, early.get("date", "")), {}))
+        for d in detail.get("absence_dates", []) or []:
+            entries.append(confs.get(confirm_key("absence", emp, d), {}))
+        exception_count += len(entries)
+        charged_count += sum(1 for e in entries if is_charged(e))
+
+    summary = s04.get("summary", {}) or {}
+    return {
+        "total_deduction": summary.get("total_deduction", 0),
+        "affected_employees": summary.get("affected_employees", 0),
+        "confirmed_count": charged_count,
+        "first_exception_rate": (
+            round(exception_count / schedule_task_count * 100, 1) if schedule_task_count > 0 else 0
+        ),
+        "confirmed_exception_rate": (
+            round(charged_count / schedule_task_count * 100, 1) if schedule_task_count > 0 else 0
+        ),
+    }
 
 
 def update_audit_result(
@@ -537,9 +594,10 @@ def update_audit_result(
     service_type: str = "",
 ) -> dict:
     """审核员手动修改审核结果（只改指定服务类型的那一条）。"""
+    service_type = require_service_type(service_type)
     result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
-        raise HTTPException(status_code=404, detail="未找到审核结果")
+        raise HTTPException(status_code=404, detail=f"未找到「{service_type}」的审核结果")
 
     from app.api.v2.core.database import json_dumps
 
@@ -562,7 +620,12 @@ def confirm_exceptions(
     confirmed_by: str,
     service_type: str = "",
 ) -> dict:
-    """批量确认异常记录。
+    """异常确认：**直接修改**这一份审核结果，而不是生成新结果。
+
+    执行三件事（顺序固定）：
+      1. 把确认/免扣标记写入该结果的 deduction_details[].confirmations；
+      2. 按唯一「计入」规则就地重算并覆盖金额与计数（recompute_audit_totals）；
+      3. 把该结果标记为「已确认」——此后它就是唯一最终版。
 
     confirmed_records: [
         {"employee_name": "张三", "work_date": "2026-07-01", "exception_type": "missing_clock", "confirmed": True, "confirm_note": ""},
@@ -572,9 +635,10 @@ def confirm_exceptions(
     """
     from app.api.v2.core.database import json_dumps, json_loads, now_text
 
+    service_type = require_service_type(service_type)
     result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
-        raise HTTPException(status_code=404, detail="未找到审核结果")
+        raise HTTPException(status_code=404, detail=f"未找到「{service_type}」的审核结果")
 
     data = json_loads(result.results_json, {})
     s04_audit = data.get("s04_attendance_audit", {})
@@ -582,11 +646,12 @@ def confirm_exceptions(
 
     confirm_map = {}
     for r in confirmed_records:
-        emp = r.get("employee_name", "")
-        date = r.get("work_date", "")
-        etype = r.get("exception_type", "missing_clock")
-        window = r.get("window", "")
-        key = f"{etype}|{emp}|{date}|{window}" if window else f"{etype}|{emp}|{date}"
+        key = confirm_key(
+            r.get("exception_type", "missing_clock"),
+            r.get("employee_name", ""),
+            r.get("work_date", ""),
+            r.get("window", ""),
+        )
         confirm_map[key] = {
             "confirmed": r.get("confirmed", False),
             "note": r.get("confirm_note", ""),
@@ -599,7 +664,7 @@ def confirm_exceptions(
         confirmations = detail.setdefault("confirmations", {})
 
         for date_str in detail.get("missing_clock_dates", []):
-            key = f"missing_clock|{emp_name}|{date_str}"
+            key = confirm_key("missing_clock", emp_name, date_str)
             if key in confirm_map:
                 confirmations[key] = {
                     "confirmed": confirm_map[key]["confirmed"],
@@ -615,8 +680,8 @@ def confirm_exceptions(
         for issue in detail.get("mid_clock_issues", []):
             date_str = issue.get("date", "")
             window = issue.get("window", "")
-            mc_key = f"missing_clock|{emp_name}|{date_str}|{window}" if window else f"missing_clock|{emp_name}|{date_str}"
-            legacy_key = f"mid_clock|{emp_name}|{date_str}|{window}" if window else f"mid_clock|{emp_name}|{date_str}"
+            mc_key = confirm_key("missing_clock", emp_name, date_str, window)
+            legacy_key = confirm_key("mid_clock", emp_name, date_str, window)
             src = confirm_map.get(mc_key) or confirm_map.get(legacy_key)
             if src is not None:
                 conf_entry = {
@@ -631,8 +696,7 @@ def confirm_exceptions(
                 updated_count += 1
 
         for late in detail.get("late_details", []):
-            date_str = late.get("date", "")
-            key = f"late|{emp_name}|{date_str}"
+            key = confirm_key("late", emp_name, late.get("date", ""))
             if key in confirm_map:
                 confirmations[key] = {
                     "confirmed": confirm_map[key]["confirmed"],
@@ -644,8 +708,7 @@ def confirm_exceptions(
                 updated_count += 1
 
         for early in detail.get("early_leave_details", []):
-            date_str = early.get("date", "")
-            key = f"early_leave|{emp_name}|{date_str}"
+            key = confirm_key("early_leave", emp_name, early.get("date", ""))
             if key in confirm_map:
                 confirmations[key] = {
                     "confirmed": confirm_map[key]["confirmed"],
@@ -657,7 +720,7 @@ def confirm_exceptions(
                 updated_count += 1
 
         for date_str in detail.get("absence_dates", []):
-            key = f"absence|{emp_name}|{date_str}"
+            key = confirm_key("absence", emp_name, date_str)
             if key in confirm_map:
                 confirmations[key] = {
                     "confirmed": confirm_map[key]["confirmed"],
@@ -669,170 +732,9 @@ def confirm_exceptions(
                 updated_count += 1
 
     data["s04_attendance_audit"] = s04_audit
-    audit_result_dao.update_audit_result_fields(
-        project_name, business_type, audit_month,
-        service_type=service_type,
-        results_json=json_dumps(data),
-    )
 
-    return {"updated_count": updated_count, "message": f"已确认{updated_count}条记录"}
-
-
-def finalize_audit(
-    project_name: str,
-    business_type: str,
-    audit_month: str,
-    confirmed_by: str,
-    service_type: str = "",
-) -> dict:
-    """确认最终版：根据确认记录计算最终扣款并标记审核结果（不再锁定，可重复执行）。"""
-    from app.api.v2.core.database import json_dumps, json_loads, now_text
-
-    result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
-    if not result:
-        raise HTTPException(status_code=404, detail="未找到审核结果")
-
-    data = json_loads(result.results_json, {})
-    s04_audit = data.get("s04_attendance_audit", {})
-    deduction_details = s04_audit.get("deduction_details", [])
-    s04_rule_cfg = s04_audit.get("s04_rules", {}) or {}
-
-    for detail in deduction_details:
-        confirmations = detail.get("confirmations", {})
-        emp_name = detail.get("employee_name", "")
-        missing_dates = detail.get("missing_clock_dates", [])
-        missing_amount = detail.get("missing_clock_amount", 0) or 0
-        missing_count = detail.get("missing_clock_count", 0) or 0
-        free_limit = detail.get("missing_clock_free_limit", 0) or 0
-
-        confirmed_missing_count = 0
-        unconfirmed_missing_count = 0
-        free_missing_count = 0
-        for date_str in missing_dates:
-            key = f"missing_clock|{emp_name}|{date_str}"
-            conf = confirmations.get(key, {})
-            if conf.get("free_deduction", False):
-                free_missing_count += 1
-            elif conf.get("confirmed", False):
-                confirmed_missing_count += 1
-            else:
-                unconfirmed_missing_count += 1
-
-        # 中间卡缺失并入漏打卡（与审核汇总口径一致：漏打卡含中间卡缺失），
-        # 与上面的 missing_clock_dates 统一计算免扣与扣款金额。
-        for issue in detail.get("mid_clock_issues", []):
-            date_str = issue.get("date", "")
-            window = issue.get("window", "")
-            mc_key = f"missing_clock|{emp_name}|{date_str}|{window}" if window else f"missing_clock|{emp_name}|{date_str}"
-            legacy_key = f"mid_clock|{emp_name}|{date_str}|{window}" if window else f"mid_clock|{emp_name}|{date_str}"
-            conf = confirmations.get(mc_key) or confirmations.get(legacy_key) or {}
-            missed = issue.get("missing", 0) or 0
-            if conf.get("free_deduction", False):
-                free_missing_count += missed
-            elif conf.get("confirmed", False):
-                confirmed_missing_count += missed
-            else:
-                unconfirmed_missing_count += missed
-
-        if missing_count > 0 and missing_amount > 0:
-            per_amount = missing_amount / missing_count
-        else:
-            per_amount = 0
-
-        final_missing_count = max(0, confirmed_missing_count - free_limit)
-        final_missing_amount = round(final_missing_count * per_amount, 2)
-
-        confirmed_late_total = 0
-        for late in detail.get("late_details", []):
-            date_str = late.get("date", "")
-            key = f"late|{emp_name}|{date_str}"
-            conf = confirmations.get(key, {})
-            if conf.get("confirmed", False) and not conf.get("free_deduction", False):
-                confirmed_late_total += late.get("amount", 0) or 0
-
-        confirmed_early_total = 0
-        for early in detail.get("early_leave_details", []):
-            date_str = early.get("date", "")
-            key = f"early_leave|{emp_name}|{date_str}"
-            conf = confirmations.get(key, {})
-            if conf.get("confirmed", False) and not conf.get("free_deduction", False):
-                confirmed_early_total += early.get("amount", 0) or 0
-
-        confirmed_absence_total = 0
-        daily_rate = detail.get("absence_daily_rate", 0) or 0
-        # 缺岗扣款倍数：detail 落库的已是 float（来自 audit_attendance_service.run_attendance_s04_audit），
-        # 次选 s04_rule_cfg.absence_penalty_multiplier（同源 float），最后兜底 1.0。
-        absence_multiplier = float(
-            detail.get("absence_multiplier")
-            or s04_rule_cfg.get("absence_penalty_multiplier")
-            or 1.0
-        )
-        for date_str in detail.get("absence_dates", []):
-            key = f"absence|{emp_name}|{date_str}"
-            conf = confirmations.get(key, {})
-            if conf.get("confirmed", False) and not conf.get("free_deduction", False):
-                confirmed_absence_total += round(daily_rate * absence_multiplier, 2)
-
-        detail["final_missing_clock_count"] = final_missing_count
-        detail["final_missing_clock_amount"] = final_missing_amount
-        detail["final_late_amount"] = confirmed_late_total
-        detail["final_early_leave_amount"] = confirmed_early_total
-        detail["final_mid_clock_amount"] = 0  # 中间卡缺失已并入 final_missing_clock_*
-        detail["final_absence_amount"] = confirmed_absence_total
-        detail["free_missing_count"] = free_missing_count
-        detail["final_total_deduction"] = round(
-            final_missing_amount
-            + confirmed_late_total
-            + confirmed_early_total
-            + confirmed_absence_total,
-            2,
-        )
-
-    data["s04_attendance_audit"] = s04_audit
-
-    total_deduction = sum(d.get("final_total_deduction", 0) for d in deduction_details)
-    data["final_summary"] = {
-        "total_deduction": total_deduction,
-        "affected_employees": len([d for d in deduction_details if d.get("final_total_deduction", 0) > 0]),
-        "confirmed_at": now_text(),
-        "confirmed_by": confirmed_by,
-    }
-
-    # 异常率计算（统一口径：异常记录数 / 排班任务数 × 100）
-    # 分子 = 异常记录数（个人考勤异常总条数：漏打卡+中间卡+迟到+早退+缺勤）
-    # 分母 = 排班任务数（slot_details 中排除休息/请假的条数）
-    slot_details_list = data.get("slot_details", []) if isinstance(data.get("slot_details"), list) else []
-    schedule_task_count = sum(1 for d in slot_details_list if d.get("status") not in ("休息", "请假"))
-
-    exception_count = 0
-    confirmed_count = 0
-    for detail in deduction_details:
-        emp_name = detail.get("employee_name", "")
-        confirmations = detail.get("confirmations", {})
-        keys: list[str] = []
-        for date_str in detail.get("missing_clock_dates", []):
-            keys.append(f"missing_clock|{emp_name}|{date_str}")
-        for issue in detail.get("mid_clock_issues", []):
-            _w = issue.get("window", "")
-            keys.append(
-                f"missing_clock|{emp_name}|{issue.get('date', '')}|{_w}"
-                if _w else f"missing_clock|{emp_name}|{issue.get('date', '')}"
-            )
-        for late in detail.get("late_details", []):
-            keys.append(f"late|{emp_name}|{late.get('date', '')}")
-        for early in detail.get("early_leave_details", []):
-            keys.append(f"early_leave|{emp_name}|{early.get('date', '')}")
-        for date_str in detail.get("absence_dates", []):
-            keys.append(f"absence|{emp_name}|{date_str}")
-        exception_count += len(keys)
-        for key in keys:
-            conf = confirmations.get(key, {})
-            if conf.get("confirmed", False) and not conf.get("free_deduction", False):
-                confirmed_count += 1
-
-    first_exception_rate = round(exception_count / schedule_task_count * 100, 1) if schedule_task_count > 0 else 0
-    confirmed_exception_rate = round(confirmed_count / schedule_task_count * 100, 1) if schedule_task_count > 0 else 0
-
+    # 就地定稿：按唯一「计入」规则重算金额，并把这份结果标记为唯一最终版。
+    recompute_audit_totals(data)
     audit_result_dao.update_audit_result_fields(
         project_name, business_type, audit_month,
         service_type=service_type,
@@ -843,10 +745,7 @@ def finalize_audit(
     )
 
     return {
-        "message": "审核结果已确认",
-        "total_deduction": total_deduction,
-        "affected_employees": data["final_summary"]["affected_employees"],
-        "confirmed_count": confirmed_count,
-        "first_exception_rate": first_exception_rate,
-        "confirmed_exception_rate": confirmed_exception_rate,
+        "updated_count": updated_count,
+        "message": f"已确认{updated_count}条记录",
+        **audit_totals_metrics(data),
     }

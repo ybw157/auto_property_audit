@@ -8,6 +8,7 @@ type Report = {
   id: number
   report_type: string
   file_format: string
+  file_path: string
   created_at: string
 }
 
@@ -114,7 +115,10 @@ function ReportCard({ item }: { item: Report }) {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `${item.report_type}.pdf`
+      // 用服务端落盘的真实文件名（含服务类型前缀与审核月份），
+      // 保证下载到的「保安考勤明细_202608.pdf」与「保洁考勤明细_202608.pdf」可区分
+      const fileName = item.file_path.split(/[\\/]/).pop()
+      a.download = fileName || `${item.report_type}.pdf`
       a.click()
       URL.revokeObjectURL(url)
     } catch {

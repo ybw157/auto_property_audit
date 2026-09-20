@@ -2,7 +2,17 @@
 from sqlalchemy.orm import Session
 
 from app.api.v2.core.database import get_db, now_text
+from app.api.v2.core.validators import require_service_type
 from app.api.v2.models.audit_result_models import AuditResult
+
+
+def _scope_q(q, service_type: str):
+    """按定位键第四列收窄查询范围：(项目, 业态, 月份, 服务类型)。
+
+    服务类型必填：缺失时直接报「缺少「服务类型」字段数据」，
+    不做「为空就不限定」这种分支——那会让保安与保洁的更新互相命中、整行覆盖。
+    """
+    return q.filter(AuditResult.service_type == require_service_type(service_type))
 
 
 def save_audit_result(result: AuditResult) -> int:
@@ -11,15 +21,17 @@ def save_audit_result(result: AuditResult) -> int:
     定位键必须包含 service_type：同一 (项目, 业态, 月份) 下保安与保洁各存一条，
     否则后审核的服务类型会覆盖先审核的记录。
     """
+    result.service_type = require_service_type(result.service_type)
     db: Session = next(get_db())
     try:
         existing = (
-            db.query(AuditResult)
-            .filter(
-                AuditResult.project_name == result.project_name,
-                AuditResult.business_type == result.business_type,
-                AuditResult.audit_month == result.audit_month,
-                AuditResult.service_type == (result.service_type or ""),
+            _scope_q(
+                db.query(AuditResult).filter(
+                    AuditResult.project_name == result.project_name,
+                    AuditResult.business_type == result.business_type,
+                    AuditResult.audit_month == result.audit_month,
+                ),
+                result.service_type,
             )
             .first()
         )
@@ -50,20 +62,19 @@ def get_audit_result(
     project_name: str,
     business_type: str,
     audit_month: str,
-    service_type: str = "",
+    service_type: str,
 ) -> AuditResult | None:
+    """按定位键取该服务类型唯一的审核结果；服务类型必填，缺失即报错。"""
     db: Session = next(get_db())
     try:
-        q = (
-            db.query(AuditResult)
-            .filter(
+        q = _scope_q(
+            db.query(AuditResult).filter(
                 AuditResult.project_name == project_name,
                 AuditResult.business_type == business_type,
                 AuditResult.audit_month == audit_month,
-            )
+            ),
+            service_type,
         )
-        if service_type:
-            q = q.filter(AuditResult.service_type == service_type)
         return q.first()
     finally:
         db.close()
@@ -75,6 +86,11 @@ def list_audit_results(
     business_type: str = "",
     service_type: str = "",
 ) -> list[AuditResult]:
+    """列表查询（非定位键）。
+
+    service_type 在这里是**可选过滤条件**，空表示「列出全部服务类型」，
+    供前端构建服务类型导航使用；它不参与写入，因此不存在互相覆盖的问题。
+    """
     db: Session = next(get_db())
     try:
         q = db.query(AuditResult)
@@ -95,22 +111,12 @@ def list_audit_results(
         db.close()
 
 
-def _apply_scope(q, service_type: str = ""):
-    """按 service_type 收窄查询范围。
-
-    service_type 为空时不限定（兼容历史数据与未传该参数的调用方）。
-    """
-    if service_type:
-        q = q.filter(AuditResult.service_type == service_type)
-    return q
-
-
 def update_audit_result_status(
     project_name: str,
     business_type: str,
     audit_month: str,
     status: str,
-    service_type: str = "",
+    service_type: str,
     **kwargs,
 ) -> None:
     db: Session = next(get_db())
@@ -119,15 +125,15 @@ def update_audit_result_status(
         for key, value in kwargs.items():
             if value is not None and hasattr(AuditResult, key):
                 values[getattr(AuditResult, key)] = value
-        q = (
-            db.query(AuditResult)
-            .filter(
+        q = _scope_q(
+            db.query(AuditResult).filter(
                 AuditResult.project_name == project_name,
                 AuditResult.business_type == business_type,
                 AuditResult.audit_month == audit_month,
-            )
+            ),
+            service_type,
         )
-        _apply_scope(q, service_type).update(values)
+        q.update(values)
         db.commit()
     finally:
         db.close()
@@ -137,7 +143,7 @@ def update_audit_result_fields(
     project_name: str,
     business_type: str,
     audit_month: str,
-    service_type: str = "",
+    service_type: str,
     **fields,
 ) -> bool:
     db: Session = next(get_db())
@@ -147,15 +153,15 @@ def update_audit_result_fields(
             if v is not None and hasattr(AuditResult, k):
                 update_data[getattr(AuditResult, k)] = v
         update_data[AuditResult.updated_at] = now_text()
-        q = (
-            db.query(AuditResult)
-            .filter(
+        q = _scope_q(
+            db.query(AuditResult).filter(
                 AuditResult.project_name == project_name,
                 AuditResult.business_type == business_type,
                 AuditResult.audit_month == audit_month,
-            )
+            ),
+            service_type,
         )
-        _apply_scope(q, service_type).update(update_data)
+        q.update(update_data)
         db.commit()
         return True
     finally:

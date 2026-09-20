@@ -90,6 +90,8 @@ class PositionInfoUpdateRequest(BaseModel):
     project_name: str
     business_type: str
     audit_month: str
+    # 定位键第四列，必填；缺失时接口直接报「缺少「服务类型」字段数据」
+    service_type: str = ""
     supplier: Optional[str] = None
     contracted_count: Optional[int] = None
     actual_count: Optional[int] = None

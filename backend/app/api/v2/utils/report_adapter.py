@@ -13,7 +13,12 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any
 
-from app.api.v2.utils.audit_common import resolve_cross_midnight
+from app.api.v2.utils.audit_common import (
+    confirm_key,
+    is_charged,
+    mid_clock_confirm,
+    resolve_cross_midnight,
+)
 
 
 def _next_date(iso_date: str) -> str:
@@ -166,11 +171,9 @@ def _build_attendance_details(
                 "reason": f"中间卡缺{issue.get('missing', 0)}次({issue.get('window', '')})",
             })
         # 该员工当天的总扣款映射到任意一天（旧版字段 deduction_amount 是一行一金额）
-        # 简化处理：扣款总和落到第一个异常日期
-        # 如果已确认，使用 final_total_deduction（确认后金额）
-        final_total = detail.get("final_total_deduction")
-        raw_total = detail.get("total_deduction", 0) or 0
-        use_amount = float(final_total) if final_total is not None else float(raw_total)
+        # 简化处理：扣款总和落到第一个异常日期。金额取该员工在审核结果里的
+        # 唯一口径 total_deduction（异常确认就地定稿后的值）。
+        use_amount = float(detail.get("total_deduction", 0) or 0)
         for dkey in list(exception_idx.keys()):
             if dkey[0] == name:
                 deduction_amount_map[dkey] = (use_amount, detail.get("position", ""))
@@ -270,153 +273,115 @@ def _build_attendance_deductions(
     audit_results: dict,
     attendance_details: list[dict],
 ) -> list[dict]:
-    """把 s04.deduction_details + slot_details 转成旧版 attendance_deductions 列表。
+    """把 s04.deduction_details 展平成旧版 attendance_deductions 明细行。
 
-    如果审核已确认（存在 confirmations），只输出被勾选确认的异常，
-    且扣款金额根据确认状态计算（免扣款的行金额为0）。
-    如果尚未确认，输出全部异常（回退到原始行为）。
+    计入规则唯一（audit_common.is_charged）：未标记免扣 且 未被取消确认 → 输出。
+    金额与 s04.summary 同源：漏打卡/中间卡缺失用合同单价
+    （s04_rules.missing_clock_amount），迟到/早退用记录原值，
+    缺勤用 日服务费×缺勤系数。岗位缺编不属人员考勤扣款，见排班履约表。
     """
     rows: list[dict] = []
     s04 = audit_results.get("s04_attendance_audit", {}) or {}
-    s04_rule_cfg = s04.get("s04_rules", {}) or {}
-    # 如果审核已确认（存在 final_summary），只输出被勾选确认的异常；
-    # 否则输出全部异常（回退到原始行为）。
-    audit_finalized = bool(audit_results.get("final_summary"))
+    rule_cfg = s04.get("s04_rules", {}) or {}
+    unit = float(rule_cfg.get("missing_clock_amount", 0) or 0)
 
     for detail in s04.get("deduction_details", []) or []:
         name = detail.get("employee_name", "")
         position = detail.get("position", "")
         confirmations = detail.get("confirmations", {}) or {}
 
-        def _is_confirmed(key: str) -> bool:
-            """审核已确认时仅返回勾选确认的；未确认时全部包含。"""
-            if not audit_finalized:
-                return True
-            conf = confirmations.get(key, {})
-            return conf.get("confirmed", False)
-
-        def _is_free(key: str) -> bool:
-            if not audit_finalized:
-                return False
-            conf = confirmations.get(key, {})
-            return conf.get("free_deduction", False)
-
         # ── 漏打卡 ──
-        missing_dates = detail.get("missing_clock_dates", []) or []
-        missing_amount = float(detail.get("missing_clock_amount", 0) or 0)
-        missing_count = detail.get("missing_clock_count", 0) or len(missing_dates)
-        per_amount = missing_amount / max(missing_count, 1) if missing_count > 0 and missing_amount > 0 else 0
-        for date_str in missing_dates:
-            key = f"missing_clock|{name}|{date_str}"
-            if not _is_confirmed(key):
+        for date_str in detail.get("missing_clock_dates", []) or []:
+            if not is_charged(confirmations.get(confirm_key("missing_clock", name, date_str), {})):
                 continue
-            free = _is_free(key)
             rows.append({
                 "employee_name": name,
                 "position": position,
                 "work_date": date_str,
                 "exception_type": "漏打卡",
                 "deduction_rule": "漏打卡扣款",
-                "deduction_amount": 0 if free else round(per_amount, 2),
-                "calculation_detail": "漏打卡扣款" + ("（免扣款）" if free else ""),
+                "deduction_amount": round(unit, 2),
+                "calculation_detail": "漏打卡扣款",
+                "rule_name": "漏打卡",
+            })
+
+        # ── 中间卡缺失（并入「漏打卡」口径）──
+        for issue in detail.get("mid_clock_issues", []) or []:
+            window = issue.get("window", "")
+            if not is_charged(mid_clock_confirm(confirmations, name, issue.get("date", ""), window)):
+                continue
+            missed = int(issue.get("missing", 0) or 0)
+            rows.append({
+                "employee_name": name,
+                "position": position,
+                "work_date": issue.get("date", ""),
+                "exception_type": "漏打卡",
+                "deduction_rule": "中间卡缺失",
+                "deduction_amount": round(unit * missed, 2),
+                "calculation_detail": f"中间卡缺{missed}次({window})",
                 "rule_name": "漏打卡",
             })
 
         # ── 迟到 ──
         for late in detail.get("late_details", []) or []:
-            date_str = late.get("date", "")
-            key = f"late|{name}|{date_str}"
-            if not _is_confirmed(key):
+            amount = float(late.get("amount", 0) or 0)
+            if amount <= 0:
                 continue
-            free = _is_free(key)
+            if not is_charged(confirmations.get(confirm_key("late", name, late.get("date", "")), {})):
+                continue
             rows.append({
                 "employee_name": name,
                 "position": position,
-                "work_date": date_str,
+                "work_date": late.get("date", ""),
                 "exception_type": "迟到",
                 "deduction_rule": "迟到扣款",
-                "deduction_amount": 0 if free else late.get("amount", 0),
-                "calculation_detail": f"迟到{int(late.get('minutes', 0) or 0)}分钟" + ("（免扣款）" if free else ""),
+                "deduction_amount": amount,
+                "calculation_detail": f"迟到{int(late.get('minutes', 0) or 0)}分钟",
                 "rule_name": "迟到",
             })
 
         # ── 早退 ──
         for early in detail.get("early_leave_details", []) or []:
-            date_str = early.get("date", "")
-            key = f"early_leave|{name}|{date_str}"
-            if not _is_confirmed(key):
+            amount = float(early.get("amount", 0) or 0)
+            if amount <= 0:
                 continue
-            free = _is_free(key)
+            if not is_charged(confirmations.get(confirm_key("early_leave", name, early.get("date", "")), {})):
+                continue
             rows.append({
                 "employee_name": name,
                 "position": position,
-                "work_date": date_str,
+                "work_date": early.get("date", ""),
                 "exception_type": "早退",
                 "deduction_rule": "早退扣款",
-                "deduction_amount": 0 if free else early.get("amount", 0),
-                "calculation_detail": f"早退{int(early.get('minutes', 0) or 0)}分钟" + ("（免扣款）" if free else ""),
+                "deduction_amount": amount,
+                "calculation_detail": f"早退{int(early.get('minutes', 0) or 0)}分钟",
                 "rule_name": "早退",
             })
 
-        # ── 缺勤/缺岗 ──
-        daily_rate = float(detail.get("absence_daily_rate", 0) or 0)
-        absence_multiplier = float(
-            detail.get("absence_multiplier")
-            or s04_rule_cfg.get("absence_penalty_multiplier")
-            or 1.0
+        # ── 缺勤 ──
+        per_absence = round(
+            float(detail.get("absence_daily_rate", 0) or 0)
+            * float(
+                detail.get("absence_multiplier")
+                or rule_cfg.get("absence_penalty_multiplier")
+                or 1.0
+            ),
+            2,
         )
         for date_str in detail.get("absence_dates", []) or []:
-            key = f"absence|{name}|{date_str}"
-            if not _is_confirmed(key):
+            if not is_charged(confirmations.get(confirm_key("absence", name, date_str), {})):
                 continue
-            free = _is_free(key)
             rows.append({
                 "employee_name": name,
                 "position": position,
                 "work_date": date_str,
                 "exception_type": "缺岗",
                 "deduction_rule": "缺勤扣款",
-                "deduction_amount": 0 if free else round(daily_rate * absence_multiplier, 2),
-                "calculation_detail": "缺勤扣款" + ("（免扣款）" if free else ""),
+                "deduction_amount": per_absence,
+                "calculation_detail": "缺勤扣款",
                 "rule_name": "缺勤",
             })
 
-        # ── 中间卡缺失（并入「漏打卡」口径，优先读 missing_clock| 键，回退 mid_clock| 兼容历史）──
-        for issue in detail.get("mid_clock_issues", []) or []:
-            date_str = issue.get("date", "")
-            window = issue.get("window", "")
-            mc_key = f"missing_clock|{name}|{date_str}|{window}" if window else f"missing_clock|{name}|{date_str}"
-            legacy_key = f"mid_clock|{name}|{date_str}|{window}" if window else f"mid_clock|{name}|{date_str}"
-            key = mc_key if mc_key in confirmations else legacy_key
-            if not _is_confirmed(key):
-                continue
-            free = _is_free(key)
-            rows.append({
-                "employee_name": name,
-                "position": position,
-                "work_date": date_str,
-                "exception_type": "漏打卡",
-                "deduction_rule": "中间卡缺失",
-                "deduction_amount": 0 if free else (issue.get("missing", 0) or 0) * 50,
-                "calculation_detail": f"中间卡缺{issue.get('missing', 0)}次({window})" + ("（免扣款）" if free else ""),
-                "rule_name": "漏打卡",
-            })
-
-    # 岗位缺编扣款（slot_details）— 仅在未确认时展示，确认后不计入扣款
-    if not audit_finalized:
-        for slot in audit_results.get("slot_details", []) or []:
-            if (slot.get("shortage_amount") or 0) <= 0:
-                continue
-            rows.append({
-                "employee_name": "",
-                "position": slot.get("position", ""),
-                "work_date": "",
-                "exception_type": "岗位缺编",
-                "deduction_rule": "岗位缺编扣款",
-                "deduction_amount": slot.get("shortage_amount", 0),
-                "calculation_detail": f"缺岗{slot.get('shortage_days', 0)}天 × 日服务费",
-                "rule_name": "岗位缺编",
-            })
     return rows
 
 
@@ -427,43 +392,29 @@ def _build_deduction_summary(audit_results: dict, attendance_deductions: list[di
     """按员工聚合扣款，返回旧版 deduction_summary 列表（TABLE_COLUMNS 期望
     employee_name / position / exception_count / total_deduction）。
 
-    如果审核已确认（存在 final_total_deduction），使用确认后的金额；
-    否则回退到从 attendance_deductions 行汇总。
+    total_deduction 直接取该员工在审核结果里的唯一口径（异常确认就地定稿后的值），
+    exception_count 取该员工已计入扣款的异常条数。
     """
-    # 构建员工 → final_total_deduction 映射
-    final_map: dict[str, float] = {}
     s04 = audit_results.get("s04_attendance_audit", {}) or {}
-    for detail in s04.get("deduction_details", []) or []:
-        name = detail.get("employee_name", "")
-        if name and "final_total_deduction" in detail:
-            final_map[name] = float(detail.get("final_total_deduction", 0) or 0)
+    total_by_emp = {
+        d.get("employee_name", ""): float(d.get("total_deduction", 0) or 0)
+        for d in s04.get("deduction_details", []) or []
+    }
 
-    by_emp: dict[str, dict] = defaultdict(lambda: {"attendance_deduction": 0.0, "position_deduction": 0.0, "total_deduction": 0.0, "exception_count": 0, "position": ""})
+    by_emp: dict[str, dict] = defaultdict(lambda: {"exception_count": 0, "position": ""})
     for d in attendance_deductions:
         name = d.get("employee_name") or ""
         if not name:
             continue
-        amt = float(d.get("deduction_amount", 0) or 0)
-        if d.get("exception_type") == "岗位缺编":
-            by_emp[name]["position_deduction"] += amt
-        else:
-            by_emp[name]["attendance_deduction"] += amt
-            by_emp[name]["exception_count"] += 1
-        by_emp[name]["total_deduction"] += amt
+        by_emp[name]["exception_count"] += 1
         by_emp[name]["position"] = by_emp[name]["position"] or d.get("position", "")
-
-    # 如果有确认后的金额，用它覆盖 attendance_deduction 和 total_deduction
-    for name, final_amt in final_map.items():
-        if name in by_emp:
-            by_emp[name]["attendance_deduction"] = final_amt
-            by_emp[name]["total_deduction"] = final_amt + by_emp[name]["position_deduction"]
 
     rows = [
         {
             "employee_name": n,
             "position": v["position"],
             "exception_count": v["exception_count"],
-            "total_deduction": round(v["total_deduction"], 2),
+            "total_deduction": round(total_by_emp.get(n, 0.0), 2),
         }
         for n, v in by_emp.items()
     ]
@@ -529,60 +480,60 @@ def _build_position_fulfillment(audit_results: dict) -> list[dict]:
 # ─────────────────────── 总 summary 字典 ───────────────────────
 
 
-def _build_summary_dict(audit_results: dict, audit_month: str, attendance_deductions: list[dict] | None = None) -> dict:
+def _count_exception_records(audit_results_s04: dict) -> tuple[int, int]:
+    """返回 (异常记录总数, 其中计入扣款的条数)。
+
+    口径与审核结果页、后端定稿完全一致：逐条异常应用唯一「计入」规则。
+    """
+    total = 0
+    charged = 0
+    for detail in audit_results_s04.get("deduction_details", []) or []:
+        name = detail.get("employee_name", "")
+        confs = detail.get("confirmations", {}) or {}
+        entries: list[dict] = []
+        for d in detail.get("missing_clock_dates", []) or []:
+            entries.append(confs.get(confirm_key("missing_clock", name, d), {}))
+        for issue in detail.get("mid_clock_issues", []) or []:
+            entries.append(mid_clock_confirm(confs, name, issue.get("date", ""), issue.get("window", "")))
+        for late in detail.get("late_details", []) or []:
+            entries.append(confs.get(confirm_key("late", name, late.get("date", "")), {}))
+        for early in detail.get("early_leave_details", []) or []:
+            entries.append(confs.get(confirm_key("early_leave", name, early.get("date", "")), {}))
+        for d in detail.get("absence_dates", []) or []:
+            entries.append(confs.get(confirm_key("absence", name, d), {}))
+        total += len(entries)
+        charged += sum(1 for e in entries if is_charged(e))
+    return total, charged
+
+
+def _build_summary_dict(audit_results: dict, audit_month: str) -> dict:
+    """总览汇总：金额与异常数一律取自审核结果本身（s04.summary / deduction_details）。
+
+    审核结果只有一份，异常确认已在定稿时就地改写它，因此这里不再折算第二套总额。
+    """
     s04 = audit_results.get("s04_attendance_audit", {}) or {}
     s04_sum = s04.get("summary", {}) or {}
-    final_sum = audit_results.get("final_summary", {}) or {}
     slot_summary = audit_results.get("summary", []) or []
     slot_details_raw = audit_results.get("slot_details", []) or []
     schedule_task_count = sum(1 for d in slot_details_raw if d.get("status") not in ("休息", "请假"))
     audited_days = _month_days_from_str(audit_month)
-    # 第一次异常数 = s04.deduction_details 中的总记录数（含岗位缺编）
-    first_exception_count = len(s04.get("deduction_details", []) or [])
-    # 确认后异常人数
-    confirmed_employees = int(final_sum.get("affected_employees") or s04_sum.get("affected_employees", 0) or 0)
-    # 已确认异常条数（attendance_deductions 中的行数）
-    confirmed_count = sum(1 for d in (attendance_deductions or []))
-    # 异常率
-    if schedule_task_count > 0:
-        first_exception_rate = round(first_exception_count / schedule_task_count * 100, 1)
-        confirmed_exception_rate = round(confirmed_employees / schedule_task_count * 100, 1)
-    else:
-        first_exception_rate = 0.0
-        confirmed_exception_rate = 0.0
-    # 岗位扣款
-    position_deduction = sum(
-        float(d.get("deduction_amount", 0) or 0)
-        for d in (attendance_deductions or [])
-        if d.get("exception_type") == "岗位缺编"
-    )
-    if not position_deduction:
-        position_deduction = sum(float(s.get("shortage_amount", 0) or 0) for s in slot_summary)
-    # 人员考勤扣款：如果审核已确认，使用 final_summary 中的确认金额；
-    # 否则回退到从 attendance_deductions 行汇总。
-    if final_sum and "total_deduction" in final_sum:
-        attendance_deduction = float(final_sum.get("total_deduction", 0) or 0)
-        # 已确认审核：总扣款 = 考勤扣款（不含岗位缺编）
-        position_deduction = 0.0
-        total_deduction = round(attendance_deduction, 2)
-    else:
-        attendance_deduction = sum(
-            float(d.get("deduction_amount", 0) or 0)
-            for d in (attendance_deductions or [])
-            if d.get("exception_type") != "岗位缺编"
-        )
-        total_deduction = round(attendance_deduction + position_deduction, 2)
+    exception_count, charged_count = _count_exception_records(s04)
+    total_deduction = float(s04_sum.get("total_deduction", 0) or 0)
     return {
         "schedule_task_count": schedule_task_count,
-        "exception_count": first_exception_count,
-        "first_exception_rate": first_exception_rate,
-        "confirmed_exception_count": confirmed_employees,
-        "confirmed_exception_rate": confirmed_exception_rate,
-        "confirmed_count": confirmed_count,
-        "skipped_count": max(first_exception_count - confirmed_count, 0),
+        "exception_count": exception_count,
+        "first_exception_rate": (
+            round(exception_count / schedule_task_count * 100, 1) if schedule_task_count > 0 else 0.0
+        ),
+        "confirmed_exception_count": charged_count,
+        "confirmed_exception_rate": (
+            round(charged_count / schedule_task_count * 100, 1) if schedule_task_count > 0 else 0.0
+        ),
+        "confirmed_count": charged_count,
+        "skipped_count": max(exception_count - charged_count, 0),
         "total_deduction": total_deduction,
-        "attendance_deduction_amount": round(attendance_deduction, 2),
-        "position_deduction_amount": round(position_deduction, 2),
+        "attendance_deduction_amount": total_deduction,
+        "position_deduction_amount": 0.0,
         "audited_days": audited_days,
         "position_count": len({s.get("position", "") for s in slot_summary if s.get("position")}),
     }
@@ -635,7 +586,7 @@ def adapt_to_old_results(
     deduction_summary_per_emp = _build_deduction_summary(audit_results, attendance_deductions)
     exception_statistics = _build_exception_statistics(attendance_deductions)
     position_fulfillment = _build_position_fulfillment(audit_results)
-    summary = _build_summary_dict(audit_results, audit_month, attendance_deductions)
+    summary = _build_summary_dict(audit_results, audit_month)
 
     # 异常率
     if summary["schedule_task_count"]:

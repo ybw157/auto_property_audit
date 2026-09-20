@@ -591,3 +591,117 @@ def classify_schedule_cell(raw: Any) -> dict:
         return {"kind": "person", "names": names, "raw": text}
     # 兜底：既非已知标记也非空，按休息忽略（避免脏数据污染审核）
     return {"kind": "rest", "names": [], "raw": text}
+
+
+# --------------------------------------------------------------------------
+# 异常确认：唯一「计入扣款」规则
+# --------------------------------------------------------------------------
+# 审核结果只有一份（audit_results 行），「已确认」(audit_results.status) 是它
+# 是否已定稿的唯一判定依据。一条异常是否计入扣款，全系统（定稿重算、审核结果页、
+# PDF 报告）只认下面这一条规则，不存在第二套口径：
+#
+#     未标记免扣 且 未被显式取消确认  →  计入
+#
+# 审核刚完成时结果里还没有 confirmations，因此全部异常默认计入（即审核时全量口径）；
+# 异常确认写入 confirmed=false 或 free_deduction=true 后，该项即不再计入。
+def confirm_key(exception_type: str, employee_name: str, work_date: str, window: str = "") -> str:
+    """异常确认键：{类型}|{员工}|{日期}[|{窗口}]。"""
+    if window:
+        return f"{exception_type}|{employee_name}|{work_date}|{window}"
+    return f"{exception_type}|{employee_name}|{work_date}"
+
+
+def mid_clock_confirm(confirmations: dict, employee_name: str, work_date: str, window: str = "") -> dict:
+    """中间卡缺失按「漏打卡」口径取确认记录（并兼容历史写入的 mid_clock| 键）。"""
+    return (
+        confirmations.get(confirm_key("missing_clock", employee_name, work_date, window))
+        or confirmations.get(confirm_key("mid_clock", employee_name, work_date, window))
+        or {}
+    )
+
+
+def is_charged(conf: dict) -> bool:
+    """唯一扣款判定规则：未免扣 且 未被取消确认 → 计入。"""
+    return bool(conf.get("confirmed", True)) and not bool(conf.get("free_deduction", False))
+
+
+def recompute_audit_totals(data: dict) -> None:
+    """按唯一「计入」规则就地重算审核结果的金额与计数（全系统唯一定稿口径）。
+
+    只改这一份结果的金额/计数，不产生任何副本；单位价取自
+    s04_rules.missing_clock_amount（不可变的合同规则值），因此对同一份结果
+    重复执行不会产生漂移（幂等）。审核结果页与 PDF 报告读的都是这里写下的值。
+    """
+    s04 = data.get("s04_attendance_audit", {}) or {}
+    rule_cfg = s04.get("s04_rules", {}) or {}
+    unit = float(rule_cfg.get("missing_clock_amount", 0) or 0)
+    details = s04.get("deduction_details", []) or []
+
+    for detail in details:
+        emp = detail.get("employee_name", "")
+        confs = detail.get("confirmations", {}) or {}
+
+        # 漏打卡（中间卡缺失并入同口径）
+        missing_count = sum(
+            1
+            for d in (detail.get("missing_clock_dates", []) or [])
+            if is_charged(confs.get(confirm_key("missing_clock", emp, d), {}))
+        ) + sum(
+            int(issue.get("missing", 0) or 0)
+            for issue in (detail.get("mid_clock_issues", []) or [])
+            if is_charged(mid_clock_confirm(confs, emp, issue.get("date", ""), issue.get("window", "")))
+        )
+        detail["missing_clock_count"] = missing_count
+        detail["missing_clock_amount"] = round(unit * missing_count, 2)
+
+        late_charged = [
+            late
+            for late in (detail.get("late_details", []) or [])
+            if is_charged(confs.get(confirm_key("late", emp, late.get("date", "")), {}))
+        ]
+        detail["late_count"] = len(late_charged)
+        detail["late_total"] = round(sum(float(late.get("amount", 0) or 0) for late in late_charged), 2)
+
+        early_charged = [
+            early
+            for early in (detail.get("early_leave_details", []) or [])
+            if is_charged(confs.get(confirm_key("early_leave", emp, early.get("date", "")), {}))
+        ]
+        detail["early_leave_count"] = len(early_charged)
+        detail["early_leave_total"] = round(sum(float(early.get("amount", 0) or 0) for early in early_charged), 2)
+
+        per_absence = round(
+            float(detail.get("absence_daily_rate", 0) or 0)
+            * float(detail.get("absence_multiplier") or rule_cfg.get("absence_penalty_multiplier") or 1.0),
+            2,
+        )
+        absence_count = sum(
+            1
+            for d in (detail.get("absence_dates", []) or [])
+            if is_charged(confs.get(confirm_key("absence", emp, d), {}))
+        )
+        detail["absence_count"] = absence_count
+        detail["absence_amount"] = round(per_absence * absence_count, 2)
+
+        detail["total_deduction"] = round(
+            detail["missing_clock_amount"]
+            + detail["late_total"]
+            + detail["early_leave_total"]
+            + detail["absence_amount"],
+            2,
+        )
+
+    total_missing = round(sum(d["missing_clock_amount"] for d in details), 2)
+    total_late = round(sum(d["late_total"] for d in details), 2)
+    total_early = round(sum(d["early_leave_total"] for d in details), 2)
+    total_absence = round(sum(d["absence_amount"] for d in details), 2)
+    s04["summary"] = {
+        "total_missing_clock_amount": total_missing,
+        "total_late_amount": total_late,
+        "total_early_leave_amount": total_early,
+        "total_absence_amount": total_absence,
+        "total_deduction": round(total_missing + total_late + total_early + total_absence, 2),
+        "affected_employees": len([d for d in details if d["total_deduction"] > 0]),
+        "overtime_warning_count": (s04.get("summary", {}) or {}).get("overtime_warning_count", 0),
+    }
+    data["s04_attendance_audit"] = s04
