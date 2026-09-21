@@ -142,7 +142,7 @@ def build_attendance_base_tables(results: dict):
     details = results.get("attendance_details", [])
     if not details:
         return []
-    # 按员工姓名分组，同一人多岗位合并到一行
+    # 按员工姓名分组，同一人多岗位合并到一行；姓名列放第一
     grouped: dict[str, dict[int, dict]] = {}
     name_positions: dict[str, set[str]] = {}
     name_areas: dict[str, set[str]] = {}
@@ -168,10 +168,11 @@ def build_attendance_base_tables(results: dict):
     max_day = min(max_day, 31)
 
     def build_half_page(day_start, day_end):
-        num_days = day_end - day_start + 1
-        row0 = ["岗位", "区域", "姓名"]
+        num_days = 15  # 上下半月固定15天，保证列数一致、宽度对齐
+        row0 = ["姓名", "岗位", "区域"]
         row1 = ["", "", ""]
-        for d in range(day_start, day_end + 1):
+        for i in range(num_days):
+            d = day_start + i
             row0.append(f"{d}日")
             row0.append("")
             row1.append("排班")
@@ -182,9 +183,15 @@ def build_attendance_base_tables(results: dict):
         for key_index, (name, by_day) in enumerate(sorted(grouped.items()), start=2):
             positions = " / ".join(sorted(name_positions.get(name, set())))
             areas = " / ".join(sorted(name_areas.get(name, set())))
-            data_row = [positions, compact_area(areas), name]
-            for d in range(day_start, day_end + 1):
+            data_row = [name, positions, compact_area(areas)]
+            for i in range(num_days):
+                d = day_start + i
+                # 下半月：31日并入30日格，保证两半表列数一致
                 item = by_day.get(d)
+                if day_start >= 16 and d == 30:
+                    item_31 = by_day.get(31)
+                    if item_31 and not item:
+                        item = item_31
                 schedule_cell, clock_cell = format_schedule_clock(item)
                 data_row.append(schedule_cell)
                 data_row.append(clock_cell)
@@ -195,7 +202,7 @@ def build_attendance_base_tables(results: dict):
                     row_styles.append(("BACKGROUND", (col_schedule, key_index), (col_clock, key_index), colors.HexColor("#FEF9C7")))
             data.append(data_row)
 
-        col_w = [10*mm, 14*mm, 9*mm]
+        col_w = [9*mm, 10*mm, 14*mm]
         for _ in range(num_days):
             col_w.append(8.15*mm)
             col_w.append(8.15*mm)
@@ -243,7 +250,7 @@ def wrap_half_page_cells(data: list[list[str]], is_header_row0: bool = False):
             cells = []
             for col_idx, cell in enumerate(row):
                 text = str(cell)
-                # 前3列(岗位/区域/姓名)用 CJK 换行；后面打卡/排班列用 LTR 换行，避免时间被拆开
+                # 前3列(姓名/岗位/区域)用 CJK 换行；后面打卡/排班列用 LTR 换行，避免时间被拆开
                 style = body_cjk if col_idx < 3 else body_ltr
                 cells.append(Paragraph(text.replace("\n", "<br/>") if text else "", style))
             wrapped.append(cells)
@@ -347,15 +354,10 @@ def build_combined_report_pdf(batch_id: int, report_dir: Path, results: dict) ->
         Paragraph(f"外包考勤 AI 审核汇总与扣款报告", s["CNTitle"]),
         Paragraph(f"{project_info.get('项目名称', '')}（{business_type}）｜{audit_month}｜生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", s["CNBody"]),
         Spacer(1, 8),
-        Paragraph("一、项目概况", s["CNHeading"]),
     ]
-    story.extend(simple_table([
-        ["项目名称", project_info.get("项目名称", ""), "业态", business_type, "审核月份", audit_month],
-        ["合同编号", project_info.get("合同编号", ""), "供应商", project_info.get("供应商", ""), "启用合同", (results.get("active_contract") or {}).get("contract_name", "未匹配")],
-    ], [24*mm, 42*mm, 20*mm, 28*mm, 24*mm, 42*mm]))
 
     # 核心审核指标
-    story.append(Paragraph("二、核心审核指标", s["CNHeading"]))
+    story.append(Paragraph("一、核心审核指标", s["CNHeading"]))
     story.extend(simple_table([
         ["排班数", schedule_count, "第一次异常数", first_exception_count],
         ["第一次异常率", f"{first_exception_rate}%", "确认后异常数", confirmed_exception_count],
@@ -363,23 +365,23 @@ def build_combined_report_pdf(batch_id: int, report_dir: Path, results: dict) ->
     ], [35*mm, 50*mm, 35*mm, 50*mm]))
 
     # 异常率说明
-    story.append(Paragraph("三、异常率说明", s["CNHeading"]))
+    story.append(Paragraph("二、异常率说明", s["CNHeading"]))
     story.append(Paragraph(f"第一次审核异常率 = 第一次异常数 / 排班任务 = {first_exception_count} / {schedule_count} = {first_exception_rate}%。该数值反映系统初次审核发现的异常比例。", s["CNBody"]))
     story.append(Paragraph(f"确认后异常率 = 确认异常条数 / 排班任务 = {confirmed_exception_count} / {schedule_count} = {confirmed_exception_rate}%。该数值反映项目确认后实际需扣款的异常比例。", s["CNBody"]))
     story.append(Paragraph(f"本次审核共确认{confirmed_count}条异常，总扣款{total_deduction}元。", s["CNBody"]))
 
     # 审核总结
-    story.append(Paragraph("四、审核总结与请款说明", s["CNHeading"]))
+    story.append(Paragraph("三、审核总结与请款说明", s["CNHeading"]))
     story.append(Paragraph(build_copyable_summary(results), s["CNBody"]))
 
     # 扣款明细
     deductions = results.get("attendance_deductions", [])
     if deductions:
-        story.append(Paragraph("五、扣款明细", s["CNHeading"]))
+        story.append(Paragraph("四、扣款明细", s["CNHeading"]))
         story.extend(table_flow(deductions[:50], "attendance_deductions"))
 
     # 管理建议
-    story.append(Paragraph("六、管理建议", s["CNHeading"]))
+    story.append(Paragraph("五、管理建议", s["CNHeading"]))
     for line in build_management_suggestions(results):
         story.append(Paragraph(line, s["CNBody"]))
 
@@ -752,10 +754,6 @@ def build_service_chapter(story, results, position_data, service_label, s, chapt
     story.append(build_service_banner(f"第 {chapter_no} 部分　{service_label}服务"))
     story.append(Spacer(1, 6))
 
-    # 一、服务项目、人员配置与费用
-    story.append(Paragraph(f"一、{service_label}服务项目、人员配置与费用", s["CNHeading"]))
-    story.extend(build_service_items_fee_table(position_data))
-
     summary = results.get("summary", {})
     schedule_count = summary.get("schedule_task_count", 0) or 0
     first_exception_count = summary.get("exception_count", 0) or 0
@@ -767,16 +765,16 @@ def build_service_chapter(story, results, position_data, service_label, s, chapt
     total_deduction = summary.get("total_deduction", 0) or 0
     confirmed_count = summary.get("confirmed_count", 0) or 0
 
-    # 二、核心审核指标
-    story.append(Paragraph(f"二、{service_label}核心审核指标", s["CNHeading"]))
+    # 一、核心审核指标
+    story.append(Paragraph(f"一、{service_label}核心审核指标", s["CNHeading"]))
     story.extend(simple_table([
         ["排班数", schedule_count, "第一次异常数", first_exception_count],
         ["第一次异常率", f"{first_exception_rate}%", "确认后异常数", confirmed_exception_count],
         ["确认后异常率", f"{confirmed_exception_rate}%", "总扣款金额", f"{total_deduction}元"],
     ], [35*mm, 50*mm, 35*mm, 50*mm]))
 
-    # 三、异常率说明
-    story.append(Paragraph(f"三、{service_label}异常率说明", s["CNHeading"]))
+    # 二、异常率说明
+    story.append(Paragraph(f"二、{service_label}异常率说明", s["CNHeading"]))
     story.append(Paragraph(
         f"第一次审核异常率 = 第一次异常数 / 排班任务 = {first_exception_count} / {schedule_count} = {first_exception_rate}%。"
         f"该数值反映系统初次审核发现的异常比例。", s["CNBody"]))
@@ -785,18 +783,18 @@ def build_service_chapter(story, results, position_data, service_label, s, chapt
         f"该数值反映项目确认后实际需扣款的异常比例。", s["CNBody"]))
     story.append(Paragraph(f"本次审核共确认{confirmed_count}条异常，总扣款{total_deduction}元。", s["CNBody"]))
 
-    # 四、审核总结与请款说明
-    story.append(Paragraph(f"四、{service_label}审核总结与请款说明", s["CNHeading"]))
+    # 三、审核总结与请款说明
+    story.append(Paragraph(f"三、{service_label}审核总结与请款说明", s["CNHeading"]))
     story.append(Paragraph(build_copyable_summary(results), s["CNBody"]))
 
-    # 五、扣款明细
+    # 四、扣款明细
     deductions = results.get("attendance_deductions", [])
     if deductions:
-        story.append(Paragraph(f"五、{service_label}扣款明细", s["CNHeading"]))
+        story.append(Paragraph(f"四、{service_label}扣款明细", s["CNHeading"]))
         story.extend(table_flow(deductions[:50], "attendance_deductions"))
 
-    # 六、管理建议
-    story.append(Paragraph(f"六、{service_label}管理建议", s["CNHeading"]))
+    # 五、管理建议
+    story.append(Paragraph(f"五、{service_label}管理建议", s["CNHeading"]))
     for line in build_management_suggestions(results):
         story.append(Paragraph(line, s["CNBody"]))
 

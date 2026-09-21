@@ -657,7 +657,8 @@ def recompute_audit_totals(data: dict) -> None:
         late_charged = [
             late
             for late in (detail.get("late_details", []) or [])
-            if is_charged(confs.get(confirm_key("late", emp, late.get("date", "")), {}))
+            if float(late.get("amount", 0) or 0) > 0  # S04-1 已转漏打卡的不重复计数
+            and is_charged(confs.get(confirm_key("late", emp, late.get("date", "")), {}))
         ]
         detail["late_count"] = len(late_charged)
         detail["late_total"] = round(sum(float(late.get("amount", 0) or 0) for late in late_charged), 2)
@@ -665,7 +666,8 @@ def recompute_audit_totals(data: dict) -> None:
         early_charged = [
             early
             for early in (detail.get("early_leave_details", []) or [])
-            if is_charged(confs.get(confirm_key("early_leave", emp, early.get("date", "")), {}))
+            if float(early.get("amount", 0) or 0) > 0  # S04-1 已转漏打卡的不重复计数
+            and is_charged(confs.get(confirm_key("early_leave", emp, early.get("date", "")), {}))
         ]
         detail["early_leave_count"] = len(early_charged)
         detail["early_leave_total"] = round(sum(float(early.get("amount", 0) or 0) for early in early_charged), 2)

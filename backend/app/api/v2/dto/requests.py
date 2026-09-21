@@ -69,6 +69,7 @@ class ConfirmRecordRequest(BaseModel):
     employee_name: str
     work_date: str
     exception_type: str = "missing_clock"
+    window: str = ""
     confirmed: bool
     confirm_note: str = ""
     free_deduction: bool = False

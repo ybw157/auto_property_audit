@@ -496,8 +496,12 @@ def _count_exception_records(audit_results_s04: dict) -> tuple[int, int]:
         for issue in detail.get("mid_clock_issues", []) or []:
             entries.append(mid_clock_confirm(confs, name, issue.get("date", ""), issue.get("window", "")))
         for late in detail.get("late_details", []) or []:
+            if float(late.get("amount", 0) or 0) <= 0:
+                continue  # S04-1 迟到>60min 已转漏打卡，与前端口径一致不重复计数
             entries.append(confs.get(confirm_key("late", name, late.get("date", "")), {}))
         for early in detail.get("early_leave_details", []) or []:
+            if float(early.get("amount", 0) or 0) <= 0:
+                continue  # S04-1 早退>60min 已转漏打卡，与前端口径一致不重复计数
             entries.append(confs.get(confirm_key("early_leave", name, early.get("date", "")), {}))
         for d in detail.get("absence_dates", []) or []:
             entries.append(confs.get(confirm_key("absence", name, d), {}))

@@ -562,8 +562,12 @@ def audit_totals_metrics(data: dict) -> dict:
         for issue in detail.get("mid_clock_issues", []) or []:
             entries.append(mid_clock_confirm(confs, emp, issue.get("date", ""), issue.get("window", "")))
         for late in detail.get("late_details", []) or []:
+            if float(late.get("amount", 0) or 0) <= 0:
+                continue  # S04-1 迟到>60min 已转漏打卡，与前端口径一致不重复计数
             entries.append(confs.get(confirm_key("late", emp, late.get("date", "")), {}))
         for early in detail.get("early_leave_details", []) or []:
+            if float(early.get("amount", 0) or 0) <= 0:
+                continue  # S04-1 早退>60min 已转漏打卡，与前端口径一致不重复计数
             entries.append(confs.get(confirm_key("early_leave", emp, early.get("date", "")), {}))
         for d in detail.get("absence_dates", []) or []:
             entries.append(confs.get(confirm_key("absence", emp, d), {}))
@@ -658,6 +662,14 @@ def confirm_exceptions(
             "free_deduction": r.get("free_deduction", False),
         }
 
+    not_confirmed = {
+        "confirmed": False,
+        "note": "审核员未勾选确认",
+        "free_deduction": False,
+        "confirmed_by": confirmed_by,
+        "confirmed_at": now_text(),
+    }
+
     updated_count = 0
     for detail in deduction_details:
         emp_name = detail.get("employee_name", "")
@@ -674,6 +686,8 @@ def confirm_exceptions(
                     "confirmed_at": now_text(),
                 }
                 updated_count += 1
+            else:
+                confirmations[key] = not_confirmed
 
         # 中间卡缺失：并入「漏打卡」确认键（与审核汇总/报告口径一致），
         # 同时保留 mid_clock| 键以兼容历史已确认数据。
@@ -694,6 +708,9 @@ def confirm_exceptions(
                 confirmations[mc_key] = conf_entry
                 confirmations[legacy_key] = conf_entry
                 updated_count += 1
+            else:
+                confirmations[mc_key] = not_confirmed
+                confirmations[legacy_key] = not_confirmed
 
         for late in detail.get("late_details", []):
             key = confirm_key("late", emp_name, late.get("date", ""))
@@ -706,6 +723,8 @@ def confirm_exceptions(
                     "confirmed_at": now_text(),
                 }
                 updated_count += 1
+            else:
+                confirmations[key] = not_confirmed
 
         for early in detail.get("early_leave_details", []):
             key = confirm_key("early_leave", emp_name, early.get("date", ""))
@@ -718,6 +737,8 @@ def confirm_exceptions(
                     "confirmed_at": now_text(),
                 }
                 updated_count += 1
+            else:
+                confirmations[key] = not_confirmed
 
         for date_str in detail.get("absence_dates", []):
             key = confirm_key("absence", emp_name, date_str)
@@ -730,6 +751,8 @@ def confirm_exceptions(
                     "confirmed_at": now_text(),
                 }
                 updated_count += 1
+            else:
+                confirmations[key] = not_confirmed
 
     data["s04_attendance_audit"] = s04_audit
 

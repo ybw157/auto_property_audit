@@ -16,6 +16,7 @@ router = APIRouter()
 @router.post("/positions/upload")
 async def upload_position_excel(
     request: Request,
+    file: UploadFile = File(..., description="岗位编制表 Excel 文件（.xlsx）"),
     project_name: str = Form("", description="项目名称（管理员可显式指定；普通账号忽略，强制用登录绑定项目）"),
     audit_month: str = Form("", description="审核月，来自 AI 审核页「选择审核月」（YYYY-MM 或 YYYYMM）"),
     service_type: str = Form("", description="服务类型（保安/保洁），必填，来自 AI 审核页「选择服务类型」"),
