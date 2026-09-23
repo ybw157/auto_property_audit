@@ -110,7 +110,11 @@ def _build_person_shift_index(position_infos: list[PositionInfo]) -> dict[tuple[
     for pi in position_infos:
         for p in pi.positions:
             shift = shift_from_raw_position(p.shift_time)
-            is_cross = resolve_cross_midnight(p.cross_midnight_raw, shift.start_time, shift.end_time)
+            # 无班次时间时跨天判定退化为 False，打卡不拆分（与 audit_common.split_cross_day_clocks 兜底一致）
+            if shift is None:
+                is_cross = False
+            else:
+                is_cross = resolve_cross_midnight(p.cross_midnight_raw, shift.start_time, shift.end_time)
             for slot in p.slots:
                 for work_date, cells in slot.daily.items():
                     for cell in cells:
@@ -153,9 +157,14 @@ def _audit_one_slot_day(
     pos_name = position.position_name
     # 解析岗位班次信息，附带在每个 slot_detail 里
     shift = shift_from_raw_position(position.shift_time)
-    is_cross = resolve_cross_midnight(position.cross_midnight_raw, shift.start_time, shift.end_time)
-    shift_start = shift.start_time or ""
-    shift_end = shift.end_time or ""
+    if shift is None:
+        is_cross = False
+        shift_start = ""
+        shift_end = ""
+    else:
+        is_cross = resolve_cross_midnight(position.cross_midnight_raw, shift.start_time, shift.end_time)
+        shift_start = shift.start_time or ""
+        shift_end = shift.end_time or ""
 
     def _base_detail(**extra) -> dict:
         """构造 slot_detail 基础结构，自动附带班次信息。"""
