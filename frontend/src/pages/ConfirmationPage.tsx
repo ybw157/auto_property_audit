@@ -341,10 +341,10 @@ export function ConfirmationPage() {
     const freeLimit = s04Data?.deduction_details.find(d => d.employee_name === record.employee_name)?.missing_clock_free_limit ?? 3
     const used = getEmployeeFreeUsed(record.employee_name)
     if (used >= freeLimit) {
-      setMessage(`${record.employee_name} 的${freeLimit}次免打卡机会已用完`)
+      setMessage('剩余次数不足，本月免打卡额度已用完')
       return
     }
-    if (confirm(`确定将"${record.exception_label}"记录设为免打卡吗？\n${record.employee_name} 剩余免打卡机会：${freeLimit - used - 1}次`)) {
+    if (confirm(`确定将"${record.exception_label}"记录设为免打卡吗？\n${record.employee_name} 当前剩余免打卡机会：${freeLimit - used}次`)) {
       setFreeDeductionMap({ ...freeDeductionMap, [key]: true })
     }
   }
@@ -571,7 +571,7 @@ export function ConfirmationPage() {
                     <div className="flex flex-col">
                       <span>{emp}</span>
                       {empFreeUsed > 0 && (
-                        <span className="text-xs text-amber-600">免打卡{empFreeUsed}/{freeLimit}</span>
+                        <span className="text-xs text-amber-600">免打卡剩{freeLimit - empFreeUsed}/{freeLimit}</span>
                       )}
                     </div>
                     <span className="text-xs text-slate-400">{empConfirmed}/{empTotal}</span>
@@ -643,20 +643,25 @@ export function ConfirmationPage() {
                             ¥{r.amount.toFixed(2)}
                           </td>
                           <td className="px-4 py-3 text-center">
-                            <button
-                              className={`rounded px-2 py-1 text-xs font-medium transition ${
-                                free
-                                  ? 'bg-amber-200 text-amber-800 hover:bg-amber-300'
-                                  : freeDisabled
-                                  ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                                  : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
-                              }`}
-                              disabled={freeDisabled}
-                              onClick={() => handleFreeDeduction(r.key)}
-                              title={free ? '点击取消免打卡' : `免打卡机会剩余：${freeLimit - freeUsed}次`}
-                            >
-                              {free ? '已免打卡' : '免打卡'}
-                            </button>
+                            <div className="flex items-center justify-center gap-1">
+                              <button
+                                className={`rounded px-2 py-1 text-xs font-medium transition ${
+                                  free
+                                    ? 'bg-amber-200 text-amber-800 hover:bg-amber-300'
+                                    : freeDisabled
+                                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                                    : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                                }`}
+                                disabled={freeDisabled}
+                                onClick={() => handleFreeDeduction(r.key)}
+                                title={free ? '点击取消免打卡' : `免打卡机会剩余：${freeLimit - freeUsed}次`}
+                              >
+                                {free ? '已免打卡' : '免打卡'}
+                              </button>
+                              {freeUsed >= freeLimit && !free && (
+                                <span className="text-xs text-red-500">剩余次数不足</span>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       )

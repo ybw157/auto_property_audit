@@ -616,6 +616,43 @@ def update_audit_result(
     return updated.to_dict()
 
 
+def validate_free_deduction_limits(
+    deduction_details: list[dict],
+    confirmed_records: list[dict],
+) -> None:
+    """免打卡次数上限校验（防绕过）。
+
+    提交即代表该员工「期望的最终免打卡集合」。按员工汇总本次提交的
+    免打卡条数，不得超过其月度免打卡额度；超出则拒绝并提示「剩余次数不足」。
+
+    说明：前端每次提交都携带该员工全部异常记录（已免/未免）的完整状态，
+    因此「本批次提交的免打卡条数」即为提交后的最终免打卡条数，与现有
+    已确认记录口径一致；即便请求绕过前端、只携带新增的免打卡条目，
+    本校验同样会拦截超额提交，杜绝绕过。
+    """
+    free_limit_by_emp: dict[str, int] = {}
+    for d in deduction_details:
+        emp = d.get("employee_name", "")
+        if emp:
+            free_limit_by_emp[emp] = int(d.get("missing_clock_free_limit") or 0)
+
+    batch_free_by_emp: dict[str, int] = {}
+    for r in confirmed_records:
+        if r.get("free_deduction"):
+            emp = r.get("employee_name", "")
+            batch_free_by_emp[emp] = batch_free_by_emp.get(emp, 0) + 1
+
+    for emp, cnt in batch_free_by_emp.items():
+        limit = free_limit_by_emp.get(emp)
+        if limit is None:
+            limit = 3  # 与前端兜底默认值一致
+        if cnt > limit:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{emp} 剩余次数不足，免打卡次数不可超过 {limit} 次",
+            )
+
+
 def confirm_exceptions(
     project_name: str,
     business_type: str,
@@ -647,6 +684,9 @@ def confirm_exceptions(
     data = json_loads(result.results_json, {})
     s04_audit = data.get("s04_attendance_audit", {})
     deduction_details = s04_audit.get("deduction_details", [])
+
+    # 免打卡次数上限校验（防绕过）：在写入任何确认/免扣记录之前拦截超额提交。
+    validate_free_deduction_limits(deduction_details, confirmed_records)
 
     confirm_map = {}
     for r in confirmed_records:

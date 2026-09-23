@@ -27,11 +27,11 @@ METADATA_EXTRACT_PROMPT = """你是一个合同审核专家。请从以下合同
 
 {
   "project_name": "项目名称",
-  "business_type": "业务类型（住宅/商业/物业/酒店/街区/写字楼/保洁/保安等）",
+  "business_type": "业务类型（住宅/商业/物业/酒店/街区/等）",
   "supplier": "供应商/乙方名称",
   "contract_no": "合同编号",
   "contract_name": "合同名称/标题",
-  "service_type": "服务类型（保洁/保安/其他）",
+  "service_type": "服务类型（保洁/保安）",
   "version": "版本号",
   "start_date": "合同开始日期",
   "end_date": "合同结束日期"
