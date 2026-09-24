@@ -348,11 +348,11 @@ def start_audit(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"该项目 {audit_month}「{business_type}」业态下仅有 "
-                    f"{'、'.join(available_sts)} 的岗位数据，"
-                    f"未找到「{service_type}」的排班记录。\n"
-                    f"请先在「AI 审核」页面上传「{service_type}」的岗位编制 Excel，"
-                    f"上传时务必在「选择服务类型」下拉框中选择「{service_type}」。"
+                    f"Excel 表内业态不匹配：业态「{business_type}」下"
+                    f"已上传的服务类型为：{'、'.join(available_sts)}，"
+                    f"未找到「{service_type}」的岗位数据。\n"
+                    f"请检查上传的 Excel 中「项目基础信息」Sheet 是否包含"
+                    f"「{business_type}」业态，以及「合同编制表」中的业态名称是否与基础信息表一致。"
                 ),
             )
         # 该范围下完全没数据 → 继续查其他业态

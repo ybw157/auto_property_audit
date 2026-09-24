@@ -120,6 +120,17 @@ def parse_project_excel(
     contract_positions = _parse_contract_positions(contract_sheet)
 
     # --- 3. 按业态聚合 ---
+    base_biz_types = {info["business_type"] for info in base_info_list}
+    contract_biz_types = {bt for bt, _ in contract_positions}
+    unmatched_contract = contract_biz_types - base_biz_types
+    if unmatched_contract:
+        raise ValueError(
+            f"Excel 表内业态不匹配：「项目基础信息」中的业态为 {sorted(base_biz_types)}，"
+            f"「合同编制表」中的业态为 {sorted(contract_biz_types)}，"
+            f"以下业态在编制表中存在但基础信息表中没有：{sorted(unmatched_contract)}。"
+            f"请确保两个 Sheet 的业态名称完全一致。"
+        )
+
     result = []
     for info in base_info_list:
         biz_type = info["business_type"]
