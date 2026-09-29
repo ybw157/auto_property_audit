@@ -1,9 +1,14 @@
 """PDF 合同解析器 —— 从 PDF 中提取文本并解析结构化扣款细则。
 
-移植自 GitHub 版本的 regex + OCR 解析方案，不依赖 LLM API。
+文字版 PDF 走 pypdf 文本层；扫描件走 OCR（ocr_pdf_text）：
+优先调用 LLM 视觉模型识别（qwen3.7-plus，实测该 key 可用），
+失败或未配置时回退本地 Tesseract，保持离线能力。
 """
+import json
 import logging
+import os
 import re
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -14,7 +19,7 @@ def extract_contract_metadata(path: Path, original_name: str) -> dict:
     source = f"{Path(original_name).stem}\n{text}"
     # 合同有效期：按用户口径只读『合同期限』这一行（不再依赖"自/从/起"前缀）
     start_date, end_date = extract_contract_period(source)
-    return {
+    result = {
         "project_name": extract_project_name(source),
         "business_type": extract_business_type(source),
         "supplier": extract_supplier(source),
@@ -26,6 +31,35 @@ def extract_contract_metadata(path: Path, original_name: str) -> dict:
         "end_date": end_date,
         "rules": extract_contract_rules(source),
     }
+    _log_parse_result(original_name, len(text), result)
+    return result
+
+
+def _log_parse_result(original_name: str, text_len: int, result: dict) -> None:
+    """把解析出的每个字段完整打到日志，方便核对细则各字段是否提取正确。"""
+    rules = result.get("rules") or {}
+    field_labels = [
+        ("project_name", "项目名称"),
+        ("supplier", "供应商/乙方"),
+        ("contract_no", "合同编号"),
+        ("contract_name", "合同名称"),
+        ("service_type", "服务类型"),
+        ("business_type", "业态"),
+        ("version", "版本"),
+        ("start_date", "合同开始"),
+        ("end_date", "合同结束"),
+    ]
+    lines = [f"[合同解析] ===== {original_name} 字段提取结果（全文 {text_len} 字）====="]
+    for key, label in field_labels:
+        lines.append(f"[合同解析]   {key}({label}) = {result.get(key)!r}")
+    lines.append(f"[合同解析]   rules(扣款细则) 共 {len(rules)} 项:")
+    if rules:
+        for k, v in rules.items():
+            lines.append(f"[合同解析]     - {k} = {json.dumps(v, ensure_ascii=False)}")
+    else:
+        lines.append("[合同解析]     (空：未提取到任何细则字段)")
+    # 单条多行日志，避免多 worker 并发时与其它合同的日志交错
+    logger.info("\n".join(lines))
 
 
 def extract_contract_period(text: str) -> tuple[str, str]:
@@ -59,16 +93,172 @@ def extract_contract_text(path: Path) -> str:
             stripped.replace("契约锁", "").replace(" ", "").replace("\n", "").replace("\r", "").replace("\f", "")
         )
         if len(stripped) < 200 or meaningful_chars < 100:
+            logger.info(
+                f"[合同解析] {path.name}: pypdf 文本层过短（总长 {len(stripped)} / 有效 {meaningful_chars} 字），"
+                f"判定为扫描件 → 触发 OCR"
+            )
             text = ocr_pdf_text(path)
+        else:
+            logger.info(f"[合同解析] {path.name}: pypdf 文本层提取成功（{len(stripped)} 字），无需 OCR")
         return text
     except Exception as e:
         logger.warning(f"PDF 文本提取失败，尝试 OCR: {e}")
         return ocr_pdf_text(path)
 
 
+_LLM_OCR_PROMPT = (
+    "请提取这张合同页面中的所有文字内容，保持原有格式和排版。\n"
+    "要求：\n"
+    "1. 完整输出所有文字，不要遗漏任何内容\n"
+    "2. 保留表格结构（用 | 分隔列，用换行分隔行）\n"
+    "3. 保留标题层级和段落结构\n"
+    "4. 只输出文字内容，不要添加任何解释或说明"
+)
+
+# 该 API Key 实测可用链（2026-09-23 真实合同探针验证）：
+# 专用 OCR 模型 qwen3.5-ocr / qwen-vl-ocr-latest / qwen3-vl-plus 均 403 未授权；
+# glm-5.2 在此网关收不到图片；qwen3.7-plus 最快最准，qwen3.6-plus 可作降级。
+_LLM_OCR_MODEL_CHAIN = ["qwen3.7-plus", "qwen3.6-plus"]
+
+
 def ocr_pdf_text(path: Path) -> str:
+    """OCR 入口（签名与职责不变）：优先 LLM 视觉识别，失败回退本地 Tesseract。
+
+    环境变量：
+    - LLM_API_KEY / LLM_BASE_URL：缺失时直接走 Tesseract（保持离线能力）
+    - LLM_OCR_MODEL：钉死单一模型；缺省用经验证的降级链 qwen3.7-plus → qwen3.6-plus
+    - LLM_OCR_WORKERS：并发页数，默认 3
+    - LLM_OCR_TIMEOUT：单页超时秒数，默认 120
+    - LLM_OCR_ENABLED=0：强制只用 Tesseract（应急开关）
+    - LLM_OCR_SCALE：LLM 链路渲染倍率，默认 1.5（实测与 2.0 质量一致、快约 40%）
+    - LLM_OCR_JPEG_QUALITY：LLM 链路图片 JPEG 质量，默认 85（体积较 PNG 降约 75%）
+    """
+    # LLM 可用时用 1.5x 渲染（快）；LLM 关闭/未配置时保持 2.0x（Tesseract 既有口径）
+    llm_ready = (
+        os.getenv("LLM_OCR_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+        and bool(os.getenv("LLM_API_KEY", "").strip())
+        and bool(os.getenv("LLM_BASE_URL", "").strip())
+    )
+    scale = float(os.getenv("LLM_OCR_SCALE", "1.5") or "1.5") if llm_ready else 2.0
+    images = _render_pdf_images(path, scale=scale)
+    if not images:
+        return ""
+    logger.info(f"[合同解析] {path.name}: 开始 OCR，共 {len(images)} 页（渲染 {scale}x）")
+
+    llm_pages = _ocr_pages_via_llm(images)
+    if llm_pages is None:
+        logger.info(f"[合同解析] {path.name}: OCR 引擎 = 本地 Tesseract（LLM 未启用或未配置），共 {len(images)} 页")
+        return "\n".join(_ocr_pages_via_tesseract(images, range(len(images))))
+
+    texts = list(llm_pages)
+    fallback_idx = [i for i, t in enumerate(texts) if not t.strip()]
+    if fallback_idx:
+        logger.warning(f"[合同解析] {path.name}: LLM OCR 第 {[i + 1 for i in fallback_idx]} 页失败，回退 Tesseract")
+        for i, t in zip(fallback_idx, _ocr_pages_via_tesseract(images, fallback_idx)):
+            texts[i] = t
+        logger.info(
+            f"[合同解析] {path.name}: OCR 引擎 = 混合（LLM {len(images) - len(fallback_idx)} 页 + "
+            f"Tesseract {len(fallback_idx)} 页）"
+        )
+    else:
+        logger.info(f"[合同解析] {path.name}: OCR 引擎 = LLM 视觉模型，{len(images)}/{len(images)} 页全部成功")
+    return "\n".join(texts)
+
+
+def _render_pdf_images(path: Path, scale: float = 2.0) -> list:
+    """把 PDF 每页渲染成 PIL 图片（两种 OCR 引擎共用）。
+
+    scale 默认 2.0（Tesseract 口径）；LLM 链路走 LLM_OCR_SCALE（默认 1.5，
+    实测与 2.0 识别质量一致、单页快约 40%）。
+    """
     try:
         import pypdfium2 as pdfium
+
+        # 使用 with 语句确保文件句柄被正确关闭
+        with pdfium.PdfDocument(str(path)) as pdf:
+            return [pdf[i].render(scale=scale).to_pil() for i in range(len(pdf))]
+    except Exception as e:
+        logger.error(f"PDF 渲染失败: {e}")
+        return []
+
+
+def _ocr_pages_via_llm(images: list) -> list | None:
+    """逐页 LLM 视觉 OCR，返回与 images 等长的文本列表（失败页为 ""）。
+
+    配置缺失 / openai 不可用 / 被 LLM_OCR_ENABLED=0 关闭时返回 None，
+    由调用方整体回退 Tesseract。
+    """
+    if os.getenv("LLM_OCR_ENABLED", "1").strip().lower() in ("0", "false", "no"):
+        logger.info("LLM_OCR_ENABLED=0，OCR 走本地 Tesseract")
+        return None
+    api_key = os.getenv("LLM_API_KEY", "").strip()
+    base_url = os.getenv("LLM_BASE_URL", "").strip()
+    if not api_key or not base_url:
+        logger.info("LLM_API_KEY/LLM_BASE_URL 未配置，OCR 回退本地 Tesseract")
+        return None
+    try:
+        from openai import OpenAI
+    except ImportError:
+        logger.warning("未安装 openai 包，OCR 回退本地 Tesseract")
+        return None
+
+    import base64
+    import io
+    from concurrent.futures import ThreadPoolExecutor
+
+    pin = os.getenv("LLM_OCR_MODEL", "").strip()
+    models = [pin] if pin else list(_LLM_OCR_MODEL_CHAIN)
+    workers = max(1, int(os.getenv("LLM_OCR_WORKERS", "6") or "6"))
+    jpeg_q = int(os.getenv("LLM_OCR_JPEG_QUALITY", "85") or "85")
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=float(os.getenv("LLM_OCR_TIMEOUT", "120") or "120"),
+    )
+    logger.info(f"[OCR-LLM] 模型链 {models}，并发 {workers}，共 {len(images)} 页，JPEG q={jpeg_q}")
+
+    def _one(idx_img):
+        idx, img = idx_img
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=jpeg_q)
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        for model in models:
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    temperature=0,
+                    max_tokens=4096,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": _LLM_OCR_PROMPT},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        ],
+                    }],
+                )
+                text = (resp.choices[0].message.content or "").strip()
+                if text:
+                    logger.info(f"[OCR-LLM] 第{idx + 1}页 ← 模型 {model} 识别成功（{len(text)} 字）")
+                    return idx, text
+            except Exception as e:
+                logger.warning(f"LLM OCR 第{idx + 1}页 模型 {model} 失败: {type(e).__name__}: {str(e)[:200]}")
+        return idx, ""
+
+    results: list = [""] * len(images)
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for idx, text in pool.map(_one, enumerate(images)):
+            results[idx] = text
+    ok_pages = sum(1 for t in results if t.strip())
+    logger.info(f"[OCR-LLM] 完成 {ok_pages}/{len(images)} 页，耗时 {time.time() - t0:.1f}s")
+    return results
+
+
+def _ocr_pages_via_tesseract(images: list, indices) -> list:
+    """本地 Tesseract OCR（原实现，作为 LLM 失败时的离线兜底）。"""
+    indices = list(indices)
+    logger.info(f"[OCR-Tesseract] 本地引擎识别 {len(indices)} 页（lang=chi_sim）")
+    try:
         import pytesseract
         import shutil
 
@@ -85,17 +275,17 @@ def ocr_pdf_text(path: Path) -> str:
         if tesseract_cmd:
             pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
-        # 使用 with 语句确保文件句柄被正确关闭
-        with pdfium.PdfDocument(str(path)) as pdf:
-            texts = []
-            for index in range(len(pdf)):
-                page = pdf[index]
-                image = page.render(scale=2.0).to_pil()
-                texts.append(pytesseract.image_to_string(image, lang="chi_sim", config="--psm 6"))
-        return "\n".join(texts)
+        out = []
+        for i in indices:
+            try:
+                out.append(pytesseract.image_to_string(images[i], lang="chi_sim", config="--psm 6"))
+            except Exception as e:
+                logger.error(f"Tesseract 第{i + 1}页失败: {e}")
+                out.append("")
+        return out
     except Exception as e:
-        logger.error(f"OCR 解析失败: {e}")
-        return ""
+        logger.error(f"Tesseract 不可用: {e}")
+        return [""] * len(indices)
 
 
 def extract_project_name(text: str) -> str:

@@ -398,7 +398,18 @@ export function ConfirmationPage() {
     setMessage('')
     try {
       const result = await submitConfirm()
-      setMessage(`确认已提交：审核结果已定稿，总扣款 ¥${Number(result?.total_deduction ?? 0).toFixed(2)}`)
+      setMessage(`确认已保存，总扣款 ¥${Number(result?.total_deduction ?? 0).toFixed(2)}，正在后台更新报告...`)
+      // 后台自动重新生成报告，不阻塞用户操作
+      const params = new URLSearchParams({
+        project_name: auditContext.project_name,
+        business_type: auditContext.business_type,
+        audit_month: auditContext.audit_month,
+        service_type: effectiveServiceType,
+        report_type: 'summary',
+      })
+      request(`/api/v2/reports/generate?${params}`, { method: 'POST' })
+        .then(() => setMessage(`确认已保存，报告已自动更新。总扣款 ¥${Number(result?.total_deduction ?? 0).toFixed(2)}`))
+        .catch(() => setMessage('确认已保存，但报告自动更新失败，请手动点击"生成扣款报告"'))
       await loadData()
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '提交失败')

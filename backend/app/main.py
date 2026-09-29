@@ -2,6 +2,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import logging
+
+# 让 app.* 业务日志（合同解析引擎选择、字段提取结果等）输出到控制台 / docker logs
+if not logging.root.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
 import uvicorn
 from dataclasses import asdict, is_dataclass
 from fastapi import FastAPI, Request
