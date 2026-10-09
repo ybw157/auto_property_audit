@@ -14,7 +14,7 @@ import re
 from datetime import datetime, date, time, timedelta
 from typing import Any
 
-from app.api.v2.models.schedule_models import Shift
+from ..models.schedule_models import Shift
 
 
 # --------------------------------------------------------------------------
@@ -28,7 +28,7 @@ def normalize_employee_name(value: Any) -> str:
     text = text.translate(str.maketrans({
         "俠": "侠", "俥": "车", "麗": "丽", "鳳": "凤", "蘭": "兰",
         "劉": "刘", "張": "张", "陳": "陈", "趙": "赵", "黃": "黄",
-        "峰": "丰", "颖": "影",
+
     }))
     text = re.sub(r"[（(].*?[)）]", "", text)
     return text.strip()
@@ -344,6 +344,24 @@ def parse_shift_by_weekday(value: Any) -> list[tuple[list[int], str, str]]:
         result.append((weekdays, start_time, end_time))
 
     return result
+
+
+def parse_position_shifts(position_name: Any, shift_time: Any) -> list[tuple[list[int], str, str]]:
+    """解析岗位班次：岗位名称含时间段时优先按岗位名解析，否则回退 shift_time 字段。
+
+    背景：编制表存在「一岗多班」写法——同一岗位按班次拆成多行（岗位名称列分别为
+    「领班(07:45-15:00)」「领班(周一至周四15:00-21:15;周五至周日15:00-21:30)」），
+    但班次时间列是合并单元格（如「7:45-15:00(周一至周四15:00-21:15）（周五-周日15:00-21:30）」）。
+    直接解析 shift_time 会把第一段班次错配给所有拆分岗位（晚班被当成早班审核），
+    且后半段星期范围（周五-周日）匹配不到任何班次而漏审。岗位名称列是按行独立的，
+    内嵌的时间段才是该拆分岗位的真实班次。
+
+    岗位名不含时间段（如「PA1」）时返回 shift_time 的解析结果，行为与原来一致。
+    """
+    name_shifts = parse_shift_by_weekday(position_name)
+    if name_shifts:
+        return name_shifts
+    return parse_shift_by_weekday(shift_time)
 
 
 def get_shift_for_date(

@@ -16,7 +16,7 @@ from app.api.v2.service.audit_attendance_service import (
 )
 from app.api.v2.utils.audit_common import (
     normalize_employee_name,
-    parse_shift_by_weekday,
+    parse_position_shifts,
     get_shift_for_date,
     parse_time_value,
     time_to_minutes,
@@ -73,7 +73,7 @@ def _find_cross_night_employees_on_last_day(
     employees: set[str] = set()
     for pi in position_infos:
         for p in pi.positions:
-            shifts = parse_shift_by_weekday(p.shift_time)
+            shifts = parse_position_shifts(p.position_name, p.shift_time)
             for slot in p.slots:
                 if last_day_date in slot.daily:
                     start, end = get_shift_for_date(shifts, last_day_date)
@@ -563,11 +563,11 @@ def audit_totals_metrics(data: dict) -> dict:
             entries.append(mid_clock_confirm(confs, emp, issue.get("date", ""), issue.get("window", "")))
         for late in detail.get("late_details", []) or []:
             if float(late.get("amount", 0) or 0) <= 0:
-                continue  # S04-1 迟到>60min 已转漏打卡，与前端口径一致不重复计数
+                continue  # S04-1 迟到超合同阈值 已转漏打卡，与前端口径一致不重复计数
             entries.append(confs.get(confirm_key("late", emp, late.get("date", "")), {}))
         for early in detail.get("early_leave_details", []) or []:
             if float(early.get("amount", 0) or 0) <= 0:
-                continue  # S04-1 早退>60min 已转漏打卡，与前端口径一致不重复计数
+                continue  # S04-1 早退超合同阈值 已转漏打卡，与前端口径一致不重复计数
             entries.append(confs.get(confirm_key("early_leave", emp, early.get("date", "")), {}))
         for d in detail.get("absence_dates", []) or []:
             entries.append(confs.get(confirm_key("absence", emp, d), {}))

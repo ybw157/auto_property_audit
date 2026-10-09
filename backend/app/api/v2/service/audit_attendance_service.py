@@ -6,10 +6,12 @@
 - 休息/空：当天该岗无人，跳过
 - 请假：有正当原因，不扣款
 
-比对 BI 考勤后：
-- S04-1 漏打卡：当月无打卡记录 / 迟到>60min / 早退>60min / 中间卡缺失，超出免扣次数后按 50 元/人次扣款
-- S04-2 迟到/早退 ≤30 分钟：20 元/次
-- S04-3 迟到/早退 ≤60 分钟（>30 且 ≤60）：50 元/次
+比对 BI 考勤后（迟到/早退的时间档位与扣款金额全部从合同细则动态读取，不在代码中
+硬编码任何阈值或金额）：
+- S04-1 漏打卡：当月无打卡记录 / 迟到早退超过合同阈值（late_early_over_minutes_as_absence）
+  / 中间卡缺失，超出免扣次数后按合同 missing_clock_deduction 金额扣款
+- 迟到/早退分档：按合同细则 late_early_tiers 中各档 max_minutes 升序匹配，
+  命中哪个区间就使用该区间配置的 amount，支持合同方配置的任意档数
 - S04-4 缺勤：签到表标记"缺岗"，按当日服务费 × 合同缺编系数（contract_deduction_coefficient）扣款
   （未配置时按 1.0 处理；与槽位缺编扣款使用同一系数，来源一致）
 
@@ -32,7 +34,7 @@ from typing import Any
 from app.api.v2.models.position_models import PositionInfo
 from app.api.v2.utils.audit_common import (
     normalize_employee_name,
-    parse_shift_by_weekday,
+    parse_position_shifts,
     get_shift_for_date,
     parse_time_value,
     time_to_minutes,
@@ -125,9 +127,11 @@ def _apply_late_early(entry: dict, late: float, early: float, s04_sub: list,
                       work_date: str, sched: dict, clock_display: list, all_clocks: list):
     """将迟到/早退结果写入员工记录（单班次与拆分班次共用）。
 
-    S04-1（>60分钟）同时写入 missing_clock_dates 和对应明细，
+    S04-1（超过合同阈值）同时写入 missing_clock_dates 和对应明细，
     确保前端"漏打卡"里能看到迟到/早退原因。
     """
+    _over = _late_over_threshold(s04_sub)
+    _over_label = f">{_over}min" if _over is not None else "超时"
     if late > 0:
         tier, amount = _classify_late_early(late, s04_sub)
         if tier == "S04-1":
@@ -137,7 +141,7 @@ def _apply_late_early(entry: dict, late: float, early: float, s04_sub: list,
                     "date": work_date, "position": sched["position"],
                     "shift_start": sched["shift_start"], "shift_end": sched["shift_end"],
                     "clock_times": list(clock_display),
-                    "missing_type": "迟到>60min转S04-1",
+                    "missing_type": f"迟到{_over_label}转S04-1",
                 })
             entry["late_details"].append({
                 "date": work_date, "position": sched["position"],
@@ -163,7 +167,7 @@ def _apply_late_early(entry: dict, late: float, early: float, s04_sub: list,
                     "date": work_date, "position": sched["position"],
                     "shift_start": sched["shift_start"], "shift_end": sched["shift_end"],
                     "clock_times": list(clock_display),
-                    "missing_type": "早退>60min转S04-1",
+                    "missing_type": f"早退{_over_label}转S04-1",
                 })
             entry["early_leave_details"].append({
                 "date": work_date, "position": sched["position"],
@@ -261,7 +265,7 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
     vacancies: dict[tuple[str, str], dict] = {}
     for pi in position_infos:
         for p in pi.positions:
-            shifts = parse_shift_by_weekday(p.shift_time)
+            shifts = parse_position_shifts(p.position_name, p.shift_time)
             mid_clock_windows = parse_mid_clock_time(p.mid_clock_time)
             for slot in p.slots:
                 for work_date, cells in slot.daily.items():
@@ -362,17 +366,125 @@ def _calc_late_early_minutes(
     return late, early
 
 
+# --------------------------------------------------------------------------
+# 迟到/早退分档（阈值与金额全部来自合同细则，不做任何硬编码）
+# --------------------------------------------------------------------------
+def _as_positive_int(value: Any) -> int | None:
+    """将配置值解析为正整数分钟数；无法解析或非正数时返回 None。"""
+    try:
+        v = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _as_amount(value: Any) -> int | None:
+    """将配置值解析为非负金额；公式类字符串（如「当日服务费*2.5」）返回 None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value) if value >= 0 else None
+    try:
+        v = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return int(v) if v >= 0 else None
+
+
+def _is_late_early_tier(sub: Any) -> bool:
+    """判断一条子规则是否为迟到/早退扣款档位（须同时具备 max_minutes 与 amount）。"""
+    if not isinstance(sub, dict):
+        return False
+    if str(sub.get("code", "")) in ("S04-1", "S04-4"):
+        return False
+    return _as_positive_int(sub.get("max_minutes")) is not None and _as_amount(sub.get("amount")) is not None
+
+
+def _late_tier_code(index: int) -> str:
+    """迟到/早退档位代码：前两档沿用 S04-2/S04-3（兼容既有前端展示），
+    更多档位自 S04-5 起顺延（S04-4 已被「缺岗」占用）。"""
+    if index == 0:
+        return "S04-2"
+    if index == 1:
+        return "S04-3"
+    return f"S04-{index + 3}"
+
+
+def _parse_minutes_from_text(text: Any) -> int | None:
+    """从档位名称文本中解析分钟阈值：「在30分钟以内」→30，「1小时以内」→60。"""
+    s = str(text or "")
+    m = re.search(r"(\d+(?:\.\d+)?)\s*小时", s)
+    if m:
+        return int(float(m.group(1)) * 60)
+    m = re.search(r"(\d+)\s*分钟", s)
+    if m:
+        return int(m.group(1))
+    if "半小时" in s:
+        return 30
+    return None
+
+
+def _late_over_threshold(s04_sub_rules: list[dict]) -> int | None:
+    """「迟到/早退超过该分钟数转缺勤（S04-1）」的阈值。
+
+    优先取 S04-1 条目的 max_minutes（即合同字段 late_early_over_minutes_as_absence）；
+    未配置时退化为最高迟到档位的 max_minutes（超出最高档即转缺勤）。
+    """
+    over = None
+    last_max = None
+    for sub in s04_sub_rules or []:
+        if not isinstance(sub, dict):
+            continue
+        v = _as_positive_int(sub.get("max_minutes"))
+        if v is None:
+            continue
+        if str(sub.get("code", "")) == "S04-1":
+            over = v
+        elif last_max is None or v > last_max:
+            last_max = v
+    return over if over is not None else last_max
+
+
 def _classify_late_early(minutes: int, s04_sub_rules: list[dict]) -> tuple[str, int]:
+    """按合同细则配置的时间档位判定迟到/早退扣款。
+
+    档位（阈值 max_minutes 与金额 amount）完全来自合同细则：
+    - s04_sub_rules 中除 S04-1（转缺勤/漏打卡）外、同时具备 max_minutes 与 amount
+      的条目视为迟到/早退档位，按 max_minutes 升序匹配，命中即返回该档金额；
+    - 分钟数超过 S04-1 阈值（缺省时为最高档位上限）→ 返回 ("S04-1", 0)；
+    - 分钟数未超 S04-1 阈值但超过所有档位上限 → 归入最高档（最后一档区间延伸至阈值）。
+
+    兜底：合同细则未配置任何有效档位时返回 ("", 0) 并打印告警——不使用任何
+    硬编码默认值，避免在配置缺失时产生错误扣款。
+    """
     if minutes <= 0:
         return "", 0
-    if minutes > 60:
+
+    tiers = sorted(
+        (
+            {
+                "code": str(sub.get("code", "")),
+                "max_minutes": _as_positive_int(sub.get("max_minutes")),
+                "amount": _as_amount(sub.get("amount")),
+            }
+            for sub in (s04_sub_rules or [])
+            if _is_late_early_tier(sub)
+        ),
+        key=lambda t: t["max_minutes"],
+    )
+    if not tiers:
+        print(f"  [告警] 合同细则未配置迟到/早退分档，{minutes} 分钟不执行扣款")
+        return "", 0
+
+    over_minutes = _late_over_threshold(s04_sub_rules)
+    if over_minutes is not None and minutes > over_minutes:
         return "S04-1", 0
-    for sub in s04_sub_rules:
-        if sub.get("code") == "S04-2" and minutes <= 30:
-            return "S04-2", int(sub.get("amount", 20))
-        if sub.get("code") == "S04-3" and minutes <= 60:
-            return "S04-3", int(sub.get("amount", 50))
-    return "S04-3", int(s04_sub_rules[-1].get("amount", 50)) if s04_sub_rules else 50
+
+    for t in tiers:
+        if minutes <= t["max_minutes"]:
+            return t["code"], t["amount"]
+    last = tiers[-1]
+    return last["code"], last["amount"]
 
 
 def _check_mid_clock_compliance(
@@ -447,11 +559,20 @@ def _check_mid_clock_compliance(
         if ws_min is None or we_min is None:
             continue
 
+        # 跨夜窗口（大数在前小数在后，如 23:00-01:00）：在午夜处拆成两段，
+        # 前半段对应当天晚上、后半段对应次日凌晨。
+        # 调用方已把当天/次日打卡分别按班次过滤后传入（当天 ≥ 上班时间-缓冲，
+        # 次日 ≤ 下班时间+缓冲），同一时刻值不存在两种归属，直接用原始时刻比较即可。
+        if ws_min > we_min:
+            ranges = ((ws_min, 1439), (0, we_min))
+        else:
+            ranges = ((ws_min, we_min),)
+
         # 计算该时间段内的打卡次数
         actual_count = 0
-        for cm in clock_mins:
-            cm_normalized = cm % 1440 if cm > 1440 else cm
-            if ws_min <= cm_normalized <= we_min:
+        for t in clock_times:
+            m = time_to_minutes(parse_time_value(t))
+            if m is not None and any(a <= m <= b for a, b in ranges):
                 actual_count += 1
 
         if actual_count < required_count:
@@ -478,7 +599,25 @@ def run_attendance_s04_audit(
     
     # 兼容两种格式：dict 直接存储规则，或 list 包含 sub_rules
     if s04_rules and "sub_rules" in s04_rules:
-        s04_sub = s04_rules.get("sub_rules", [])
+        raw_sub = s04_rules.get("sub_rules", [])
+        # 为迟到/早退档位补全 max_minutes（缺失时从档位名称文本解析，如「在30分钟以内」→30），
+        # 阈值与金额均以合同细则为准，无效档位直接跳过，不使用任何默认值。
+        s04_sub = []
+        for sub in raw_sub:
+            if not isinstance(sub, dict):
+                continue
+            code = str(sub.get("code", ""))
+            if code in ("S04-1", "S04-4"):
+                s04_sub.append(sub)
+                continue
+            max_min = _as_positive_int(sub.get("max_minutes"))
+            if max_min is None:
+                max_min = _parse_minutes_from_text(sub.get("name", ""))
+            amount = _as_amount(sub.get("amount"))
+            if max_min is None or amount is None:
+                print(f"  [告警] 合同细则中档位 {sub.get('name') or code} 缺少有效阈值/金额，已跳过")
+                continue
+            s04_sub.append({**sub, "max_minutes": max_min, "amount": amount})
         s04_1 = next((r for r in s04_sub if r.get("code") == "S04-1"), None)
         missing_free = int(s04_1.get("free_limit", 3)) if s04_1 else 3
         missing_amount = int(s04_1.get("amount", 50)) if s04_1 else 50
@@ -489,14 +628,28 @@ def run_attendance_s04_audit(
         missing_amount = int(s04_rules.get("missing_clock_deduction", 50))
         # 如果有 late_early_over_minutes_as_absence 字段，说明支持缺勤判定
         s04_4 = {"code": "S04-4"} if "late_early_over_minutes_as_absence" in s04_rules else None
-        # 构建 s04_sub 用于 _classify_late_early
+        # 构建 s04_sub 用于 _classify_late_early：档数任意，阈值/金额全部取自合同细则，
+        # 缺 max_minutes 或 amount 的档位视为无效并跳过（不填默认值）。
+        # 先按 max_minutes 升序再分配档位代码，保证合同录入乱序时代码仍与阈值一致。
         late_early_tiers = s04_rules.get("late_early_tiers", [])
-        s04_sub = []
+        valid_tiers = []
         for i, t in enumerate(late_early_tiers):
-            code = "S04-2" if i == 0 else "S04-3"
-            s04_sub.append({"code": code, "amount": t.get("amount", 20), "max_minutes": t.get("max_minutes", 30)})
-        if s04_rules.get("late_early_over_minutes_as_absence"):
-            s04_sub.append({"code": "S04-1", "amount": 0})
+            if not isinstance(t, dict):
+                continue
+            max_min = _as_positive_int(t.get("max_minutes"))
+            amount = _as_amount(t.get("amount"))
+            if max_min is None or amount is None:
+                print(f"  [告警] 合同细则迟到/早退第 {i + 1} 档缺少有效阈值或金额，已跳过：{t}")
+                continue
+            valid_tiers.append({"max_minutes": max_min, "amount": amount})
+        valid_tiers.sort(key=lambda t: t["max_minutes"])
+        s04_sub = [
+            {"code": _late_tier_code(i), "amount": t["amount"], "max_minutes": t["max_minutes"]}
+            for i, t in enumerate(valid_tiers)
+        ]
+        over_minutes = _as_positive_int(s04_rules.get("late_early_over_minutes_as_absence"))
+        if over_minutes is not None:
+            s04_sub.append({"code": "S04-1", "amount": 0, "max_minutes": over_minutes})
     else:
         missing_free = 3
         missing_amount = 50
@@ -795,8 +948,16 @@ def run_attendance_s04_audit(
             "free_missing_clock_times": missing_free,
             "missing_clock_amount": missing_amount,
             "late_early_tiers": [
-                {"code": r.get("code"), "name": r.get("name"), "amount": r.get("amount")}
-                for r in s04_sub if r.get("code") in ("S04-2", "S04-3")
+                {
+                    "code": r.get("code"),
+                    "name": r.get("name"),
+                    "amount": r.get("amount"),
+                    "max_minutes": r.get("max_minutes"),
+                }
+                for r in sorted(
+                    (r for r in s04_sub if _is_late_early_tier(r)),
+                    key=lambda r: _as_positive_int(r.get("max_minutes")),
+                )
             ],
             "absence_penalty_multiplier": absence_multiplier,
             "absence_penalty": f"日服务费×{absence_multiplier}",

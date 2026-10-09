@@ -21,6 +21,7 @@ from typing import Any
 
 from app.api.v2.models.position_models import PositionInfo
 from app.api.v2.models.position_models import ScheduleSlot
+from app.api.v2.models.schedule_models import Shift
 from app.api.v2.utils.audit_common import (
     normalize_employee_name,
     normalize_position_name,
@@ -29,7 +30,8 @@ from app.api.v2.utils.audit_common import (
     time_to_minutes,
     resolve_cross_midnight,
     split_cross_day_clocks,
-    shift_from_raw_position,
+    parse_position_shifts,
+    get_shift_for_date,
     get_next_date,
 )
 
@@ -100,8 +102,11 @@ def _build_bi_index(bi_records: list[dict], audit_month: str):
 
 
 def _build_person_shift_index(position_infos: list[PositionInfo]) -> dict[tuple[str, str], Any]:
-    """从 Position.shift_time 解析班次，构建 (归一化姓名,日期)->班次，
+    """从 Position 解析班次，构建 (归一化姓名,日期)->班次，
     供跨天打卡拆分（夜班次日的下班卡归属前一天）使用。
+
+    班次按「岗位名内嵌时间段优先、shift_time 字段兜底」解析（一岗多班场景下
+    shift_time 是多班合并文本，直接取首段会错配），再按当天星期取对应班次。
 
     同时按「编制表 cross_midnight 字段优先、时间数值关系兜底」解析跨夜标志，
     与 S04 考勤审核的跨夜判定保持一致。
@@ -109,14 +114,17 @@ def _build_person_shift_index(position_infos: list[PositionInfo]) -> dict[tuple[
     index: dict[tuple[str, str], Any] = {}
     for pi in position_infos:
         for p in pi.positions:
-            shift = shift_from_raw_position(p.shift_time)
-            # 无班次时间时跨天判定退化为 False，打卡不拆分（与 audit_common.split_cross_day_clocks 兜底一致）
-            if shift is None:
-                is_cross = False
-            else:
-                is_cross = resolve_cross_midnight(p.cross_midnight_raw, shift.start_time, shift.end_time)
+            shifts = parse_position_shifts(p.position_name, p.shift_time)
             for slot in p.slots:
                 for work_date, cells in slot.daily.items():
+                    start, end = get_shift_for_date(shifts, work_date)
+                    if start and end:
+                        shift = Shift(shift_name=p.position_name, start_time=start, end_time=end)
+                        is_cross = resolve_cross_midnight(p.cross_midnight_raw, start, end)
+                    else:
+                        # 无班次时间时跨天判定退化为 False，打卡不拆分（与 audit_common.split_cross_day_clocks 兜底一致）
+                        shift = None
+                        is_cross = False
                     for cell in cells:
                         for name in cell.get("names", []):
                             nn = normalize_employee_name(name)
@@ -155,16 +163,15 @@ def _audit_one_slot_day(
 ) -> dict | None:
     """判定一个槽位某一天的履约状态。返回 None 表示该天不计审核（休息/请假）。"""
     pos_name = position.position_name
-    # 解析岗位班次信息，附带在每个 slot_detail 里
-    shift = shift_from_raw_position(position.shift_time)
-    if shift is None:
+    # 解析岗位班次信息，附带在每个 slot_detail 里。
+    # 岗位名内嵌时间段优先（一岗多班时 shift_time 是多班合并文本，取首段会错配），
+    # 再按当天星期取对应班次。
+    shifts = parse_position_shifts(position.position_name, position.shift_time)
+    shift_start, shift_end = get_shift_for_date(shifts, work_date)
+    if not shift_start or not shift_end:
         is_cross = False
-        shift_start = ""
-        shift_end = ""
     else:
-        is_cross = resolve_cross_midnight(position.cross_midnight_raw, shift.start_time, shift.end_time)
-        shift_start = shift.start_time or ""
-        shift_end = shift.end_time or ""
+        is_cross = resolve_cross_midnight(position.cross_midnight_raw, shift_start, shift_end)
 
     def _base_detail(**extra) -> dict:
         """构造 slot_detail 基础结构，自动附带班次信息。"""

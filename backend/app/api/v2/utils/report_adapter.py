@@ -18,6 +18,8 @@ from app.api.v2.utils.audit_common import (
     is_charged,
     mid_clock_confirm,
     resolve_cross_midnight,
+    parse_position_shifts,
+    get_shift_for_date,
 )
 
 
@@ -96,20 +98,16 @@ def _build_attendance_details(
         pos_name = p.get("position_name", "") or p.get("position", "")
         pos_shift_time = p.get("shift_time", "") or ""
         pos_cross_midnight_raw = p.get("cross_midnight_raw", "") or ""
-        # 从 position 级别 shift_time 解析 start/end（slot 里通常没有这俩字段）
-        pos_start = ""
-        pos_end = ""
-        if pos_shift_time:
-            parts = re.split(r"[-~—至到]", pos_shift_time)
-            if len(parts) == 2:
-                pos_start = parts[0].strip()
-                pos_end = parts[1].strip()
+        # 岗位名内嵌时间段优先（一岗多班时 shift_time 是多班合并文本，取首段会错配），
+        # 再按当天星期取对应班次（slot 里通常没有 shift_start/shift_end 字段）
+        pos_shifts = parse_position_shifts(pos_name, pos_shift_time)
         for slot in p.get("slots", []) or []:
             area = slot.get("area", "")
             shift_name = slot.get("shift_name", "")
-            shift_start = slot.get("shift_start", "") or pos_start
-            shift_end = slot.get("shift_end", "") or pos_end
             for work_date, cells in (slot.get("daily") or {}).items():
+                pos_start, pos_end = get_shift_for_date(pos_shifts, str(work_date))
+                shift_start = slot.get("shift_start", "") or pos_start
+                shift_end = slot.get("shift_end", "") or pos_end
                 for cell in cells or []:
                     for name in cell.get("names", []) or []:
                         nn = _normalize_employee_name(name)
@@ -497,11 +495,11 @@ def _count_exception_records(audit_results_s04: dict) -> tuple[int, int]:
             entries.append(mid_clock_confirm(confs, name, issue.get("date", ""), issue.get("window", "")))
         for late in detail.get("late_details", []) or []:
             if float(late.get("amount", 0) or 0) <= 0:
-                continue  # S04-1 迟到>60min 已转漏打卡，与前端口径一致不重复计数
+                continue  # S04-1 迟到超合同阈值 已转漏打卡，与前端口径一致不重复计数
             entries.append(confs.get(confirm_key("late", name, late.get("date", "")), {}))
         for early in detail.get("early_leave_details", []) or []:
             if float(early.get("amount", 0) or 0) <= 0:
-                continue  # S04-1 早退>60min 已转漏打卡，与前端口径一致不重复计数
+                continue  # S04-1 早退超合同阈值 已转漏打卡，与前端口径一致不重复计数
             entries.append(confs.get(confirm_key("early_leave", name, early.get("date", "")), {}))
         for d in detail.get("absence_dates", []) or []:
             entries.append(confs.get(confirm_key("absence", name, d), {}))

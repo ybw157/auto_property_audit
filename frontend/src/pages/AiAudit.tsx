@@ -1,5 +1,5 @@
 import { DragEvent, ChangeEvent, useEffect, useState } from 'react'
-import { request, API_BASE_URL } from '../services/api'
+import { request } from '../services/api'
 import { fetchBusinessTypes, fetchContracts } from '../services/configCache'
 import type { AuditContext } from '../types'
 import { useAuth } from '../hooks/useAuth'
@@ -21,6 +21,8 @@ type UploadResult = {
   audit_month: string
   bi_month: string
   service_type: string
+  /** 解析出的排班数据，每个元素对应一个业态，business_type 取自表格「业态」列原值 */
+  positions?: Array<{ business_type?: string }>
 }
 
 type StartAuditResult = {
@@ -55,6 +57,17 @@ export function AiAudit() {
   const [loading, setLoading] = useState(false)
   const [dragging, setDragging] = useState<FileKind | 'all' | null>(null)
   const [uploaded, setUploaded] = useState(false)
+  // 最近一次上传的表格里解析出的业态名（原值，不做归一），
+  // 用于和业态映射表比对并在页面上提醒不一致
+  const [parsedBizTypes, setParsedBizTypes] = useState<string[]>([])
+
+  /** 上传成功后记录表格解析出的业态名集合 */
+  function recordParsedBizTypes(result: UploadResult) {
+    const types = Array.from(
+      new Set((result.positions ?? []).map((p) => (p.business_type ?? '').trim()).filter(Boolean)),
+    )
+    setParsedBizTypes(types)
+  }
 
   useEffect(() => {
     fetchContracts<Array<{ project_name: string; project_code: string; business_type: string }>>().then((items) => {
@@ -113,7 +126,8 @@ export function AiAudit() {
     if (missing) return setMessage(missing)
     setLoading(true)
     try {
-      await request('/api/v2/positions/upload', { method: 'POST', body: buildUploadForm(projectFile) })
+      const uploadResult = await request<UploadResult>('/api/v2/positions/upload', { method: 'POST', body: buildUploadForm(projectFile) })
+      recordParsedBizTypes(uploadResult)
       const auditMonthFormatted = auditMonth.replace('-', '')
       const result = await request<StartAuditResult>('/api/v2/audit-results/start', {
         method: 'POST',
@@ -155,6 +169,7 @@ export function AiAudit() {
     try {
       const result = await request<UploadResult>('/api/v2/positions/upload', { method: 'POST', body: buildUploadForm(file) })
       setUploaded(true)
+      recordParsedBizTypes(result)
       setMessage(`项目基础资料已上传：${file.name}（项目 ${result.project_name}／审核月 ${result.audit_month}／服务类型 ${result.service_type}），可点击「开始AI审核」发起审核。`)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '上传失败')
@@ -171,6 +186,7 @@ export function AiAudit() {
     if (kind === 'project') {
       setProjectFile(file)
       setUploaded(false)
+      setParsedBizTypes([])
       setMessage(`正在上传：${file.name}`)
       autoUploadProject(file)
       return
@@ -189,6 +205,7 @@ export function AiAudit() {
       if (name.includes('项目') || name.includes('基础')) {
         setProjectFile(file)
         setUploaded(false)
+        setParsedBizTypes([])
         setMessage(`正在上传：${file.name}`)
         autoUploadProject(file)
         return
@@ -199,6 +216,7 @@ export function AiAudit() {
     }
     setProjectFile(validFiles[0])
     setUploaded(false)
+    setParsedBizTypes([])
     setMessage(`正在上传：${validFiles[0].name}`)
     autoUploadProject(validFiles[0])
   }
@@ -237,8 +255,9 @@ export function AiAudit() {
       // 若尚未上传，先上传再审核：与自动上传共用 buildUploadForm，
       // 保证审核月 / 服务类型不会漏传（服务端缺任一即 400）
       if (!uploaded) {
-        await request<UploadResult>('/api/v2/positions/upload', { method: 'POST', body: buildUploadForm(projectFile) })
+        const uploadResult = await request<UploadResult>('/api/v2/positions/upload', { method: 'POST', body: buildUploadForm(projectFile) })
         setUploaded(true)
+        recordParsedBizTypes(uploadResult)
       }
       const auditMonthFormatted = auditMonth.replace('-', '')
       const result = await request<StartAuditResult>('/api/v2/audit-results/start', {
@@ -261,6 +280,28 @@ export function AiAudit() {
     }
   }
 
+  // 业态一致性提醒：表格解析出的业态名（原值，不做归一）与该项目业态映射表比对。
+  // 只提醒、不拦截 —— 不一致的业态审核时会查不到岗位，也无法生成对应报告。
+  const mappingTypes = businessTypeMapping[selectedProjectName] || []
+  const unknownBizTypes = parsedBizTypes.filter((t) => !mappingTypes.includes(t))
+  const selectedBizMissing = Boolean(
+    businessType && parsedBizTypes.length > 0 && !parsedBizTypes.includes(businessType),
+  )
+  const bizTypeWarnings: string[] = []
+  if (unknownBizTypes.length > 0) {
+    bizTypeWarnings.push(
+      `表格中解析出的业态「${unknownBizTypes.join('、')}」不在当前项目的业态映射表中` +
+        `${mappingTypes.length ? `（映射表业态：${mappingTypes.join('、')}）` : '（该项目尚未配置业态映射）'}，` +
+        `这些业态的排班无法审核、也无法生成报告。请检查表格「业态」列是否填写有误，或联系管理员更新业态映射表。`,
+    )
+  }
+  if (selectedBizMissing) {
+    bizTypeWarnings.push(
+      `本次上传的表格中没有当前所选业态「${businessType}」的排班数据（表格内业态：${parsedBizTypes.join('、')}），` +
+        `继续审核会提示「岗位缺失」。请确认是否选错了业态或传错了表格。`,
+    )
+  }
+
   return (
     <div className="space-y-6">
       <div
@@ -278,7 +319,7 @@ export function AiAudit() {
               {selectedProjectName || '未绑定项目，请先在顶部选择项目账号对应项目'}
             </div>
           ) : (
-            <select className="input mt-2 w-full" value={selectedProjectName} onChange={(event) => setSelectedProjectName(event.target.value)}>
+            <select className="input mt-2 w-full" value={selectedProjectName} onChange={(event) => { setSelectedProjectName(event.target.value); setParsedBizTypes([]) }}>
               <option value="">请选择项目</option>
               {projects.map((item) => (
                 <option key={`${item.project_name}-${item.project_code}`} value={item.project_name}>
@@ -349,12 +390,16 @@ export function AiAudit() {
         <div className="mt-6 flex flex-wrap items-center gap-3">
           <button className="btn-primary" disabled={loading} onClick={createAndUpload}>{loading ? '审核中...' : '开始AI审核'}</button>
           <button className="btn-secondary" disabled={loading || !batchId} onClick={resubmitSchedule}>重新提交排班</button>
-          <a className="btn-secondary" href={`${API_BASE_URL}/api/v2/templates/project_base`}>下载项目模板</a>
         </div>
       </div>
       <div className="card p-6">
         <h2 className="text-base font-semibold">审核进度</h2>
         <div className="mt-3 rounded-xl bg-slate-100 p-4 text-sm text-slate-700">{message}</div>
+        {bizTypeWarnings.map((warning) => (
+          <div key={warning} className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+            <span className="font-medium">业态提醒：</span>{warning}
+          </div>
+        ))}
         {batchId && <div className="mt-3 text-sm text-slate-500">当前批次：{batchId}</div>}
       </div>
     </div>
