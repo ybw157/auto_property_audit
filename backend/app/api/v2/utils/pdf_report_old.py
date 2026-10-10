@@ -196,10 +196,10 @@ def build_attendance_base_tables(results: dict):
                 data_row.append(schedule_cell)
                 data_row.append(clock_cell)
                 if item and is_exception(item):
-                    col_schedule = 3 + (d - day_start) * 2
-                    col_clock = col_schedule + 1
-                    # 异常单元格黄色背景，字体保持黑色（异常原因靠内联<font>标签变红）
-                    row_styles.append(("BACKGROUND", (col_schedule, key_index), (col_clock, key_index), colors.HexColor("#FEF9C7")))
+                    col_clock = 3 + (d - day_start) * 2 + 1
+                    # 只有打卡格（异常数据所在格）标黄底；排班格是正常班次信息，保持白底。
+                    # 字体保持黑色（异常情况靠内联<font>标签变红）
+                    row_styles.append(("BACKGROUND", (col_clock, key_index), (col_clock, key_index), colors.HexColor("#FEF9C7")))
             data.append(data_row)
 
         col_w = [9*mm, 10*mm, 14*mm]
@@ -272,7 +272,8 @@ def format_schedule_clock(row: dict | None, shift_info: str = "") -> tuple[str, 
     else:
         clock_text = str(clock_times).replace(";", " ")
     if is_exception(row):
-        reason = str(row.get("exception_type") or row.get("exception_reason") or "异常")
+        # 异常情况优先展示完整原因（含分钟数/缺卡次数，如"迟到44分钟"），其次才是类型（"迟到"）
+        reason = str(row.get("exception_reason") or row.get("exception_type") or "异常")
         clock_text = f"{clock_text}\n<font color='#C41E3A'>{reason}</font>" if clock_text.strip() else f"<font color='#C41E3A'>{reason}</font>"
     return schedule_text, clock_text
 
