@@ -40,6 +40,7 @@ from app.api.v2.utils.audit_common import (
     time_to_minutes,
     parse_mid_clock_time,
     resolve_cross_midnight,
+    daily_service_fee,
 )
 
 
@@ -262,7 +263,9 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
     - 同一天同一人出现在多个岗位时，所有候选班次都保留（list 追加，不覆盖）。
     """
     index: dict[tuple[str, str], list[dict]] = {}
-    vacancies: dict[tuple[str, str], dict] = {}
+    # 键带槽位身份（岗位, 槽位标识, 日期）：同名岗位（如商业保洁 40 个「保洁」岗）
+    # 同日多槽位缺岗必须各自独立计数，否则按 (岗位,日期) 聚合会坍缩成一条、少扣款
+    vacancies: dict[tuple[str, str, str], dict] = {}
     for pi in position_infos:
         for p in pi.positions:
             shifts = parse_position_shifts(p.position_name, p.shift_time)
@@ -276,14 +279,19 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                     for cell in cells:
                         status = cell.get("status", "")
                         if status == "缺岗":
-                            key = (p.position_name, work_date)
+                            slot_ident = slot.area or f"槽位{slot.slot_index}"
+                            key = (p.position_name, slot_ident, work_date)
                             if key not in vacancies:
                                 vacancies[key] = {
                                     "shift_start": start,
                                     "shift_end": end,
                                     "position": p.position_name,
+                                    "slot_ident": slot_ident,
                                     "hourly_rate": p.hourly_rate,
                                     "daily_hours": p.daily_hours,
+                                    "monthly_total": p.monthly_total,
+                                    "actual_count": p.actual_count,
+                                    "service_type": pi.service_type,
                                     "is_cross_midnight": auto_cross,
                                     "mid_clock_windows": mid_clock_windows,
                                 }
@@ -297,6 +305,9 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                                     "position": p.position_name,
                                     "hourly_rate": p.hourly_rate,
                                     "daily_hours": p.daily_hours,
+                                    "monthly_total": p.monthly_total,
+                                    "actual_count": p.actual_count,
+                                    "service_type": pi.service_type,
                                     "is_cross_midnight": auto_cross,
                                     "mid_clock_windows": mid_clock_windows,
                                 }
@@ -681,7 +692,9 @@ def run_attendance_s04_audit(
                 "absence_dates": set(),
                 "absence_records": [],
                 "mid_clock_issues": [],
-                "daily_rate": round(sched_list[0]["hourly_rate"] * sched_list[0]["daily_hours"], 2),
+                "daily_rate": daily_service_fee(sched_list[0]["hourly_rate"], sched_list[0]["daily_hours"],
+                                                 sched_list[0].get("monthly_total"), sched_list[0].get("actual_count"),
+                                                 sched_list[0].get("service_type")),
                 "overtime_warnings": [],
             })
             positions = [s["position"] for s in sched_list]
@@ -711,10 +724,14 @@ def run_attendance_s04_audit(
                         _buf = int(_shift_mins * 0.5)
                         if _s_min is not None:
                             _s_buf = max(0, _s_min - _buf)
-                            clocks = [t for t in clocks if (time_to_minutes(parse_time_value(t)) or -1) >= _s_buf]
+                            # 显式判 None：time_to_minutes 对 00:00:xx 返回 0（falsy），
+                            # 不能用 or 兜底，否则零点整的合法打卡会被误丢
+                            clocks = [t for t in clocks
+                                      if (m := time_to_minutes(parse_time_value(t))) is not None and m >= _s_buf]
                         if _e_min is not None:
                             _e_buf = _e_min + _buf
-                            next_clocks = [t for t in next_clocks if (time_to_minutes(parse_time_value(t)) or 9999) <= _e_buf]
+                            next_clocks = [t for t in next_clocks
+                                           if (m := time_to_minutes(parse_time_value(t))) is not None and m <= _e_buf]
                     else:
                         next_dt = ""
                         next_clocks = []
@@ -743,7 +760,9 @@ def run_attendance_s04_audit(
                         "absence_dates": set(),
                         "absence_records": [],
                         "mid_clock_issues": [],
-                        "daily_rate": round(sched["hourly_rate"] * sched["daily_hours"], 2),
+                        "daily_rate": daily_service_fee(sched["hourly_rate"], sched["daily_hours"],
+                                                         sched.get("monthly_total"), sched.get("actual_count"),
+                                                         sched.get("service_type")),
                         "overtime_warnings": entry.get("overtime_warnings", []),
                     })
 
@@ -791,12 +810,14 @@ def run_attendance_s04_audit(
             _buf = int(_shift_mins * 0.5)
             if _s_min is not None:
                 _s_buf = max(0, _s_min - _buf)
+                # 显式判 None：time_to_minutes 对 00:00:xx 返回 0（falsy），
+                # 不能用 or 兜底，否则零点整的合法打卡会被误丢
                 clocks = [t for t in clocks
-                          if (time_to_minutes(parse_time_value(t)) or -1) >= _s_buf]
+                          if (m := time_to_minutes(parse_time_value(t))) is not None and m >= _s_buf]
             if _e_min is not None:
                 _e_buf = _e_min + _buf
                 next_clocks = [t for t in next_clocks
-                               if (time_to_minutes(parse_time_value(t)) or 9999) <= _e_buf]
+                               if (m := time_to_minutes(parse_time_value(t))) is not None and m <= _e_buf]
 
         def _sort_key(t: str) -> int:
             v = parse_time_value(t)
@@ -822,7 +843,9 @@ def run_attendance_s04_audit(
             "absence_dates": set(),
             "absence_records": [],
             "mid_clock_issues": [],
-            "daily_rate": round(sched["hourly_rate"] * sched["daily_hours"], 2),
+            "daily_rate": daily_service_fee(sched["hourly_rate"], sched["daily_hours"],
+                                             sched.get("monthly_total"), sched.get("actual_count"),
+                                             sched.get("service_type")),
             "overtime_warnings": [],
         })
 
@@ -852,11 +875,13 @@ def run_attendance_s04_audit(
         _apply_late_early(entry, late, early, s04_sub, work_date, sched, clock_display, all_clocks)
         _check_missing_clockout(entry, is_cross, clocks, next_clocks, all_clocks, work_date, sched, clock_display)
 
-    # 处理缺岗：签到表标记"缺岗" = 确定缺勤，不比对考勤
+    # 处理缺岗：签到表标记"缺岗"/"缺勤" = 确定缺勤，不比对考勤
     vacancy_absence_count = 0
-    for (pos, work_date), vac in vacancies.items():
+    for (pos, slot_ident, work_date), vac in vacancies.items():
         vacancy_absence_count += 1
-        fake_name = f"[缺岗]{pos}"
+        # 假员工名带槽位标识：同名岗位的不同槽位缺岗各自成行，
+        # 保证同一天同岗位多槽位缺勤按槽位数分别扣款（费率也各自取准）
+        fake_name = f"[缺岗]{pos}({slot_ident})"
         entry = employee_data.setdefault(fake_name, {
             "employee_name": fake_name,
             "position": pos,
@@ -868,7 +893,9 @@ def run_attendance_s04_audit(
             "absence_dates": set(),
             "absence_records": [],
             "mid_clock_issues": [],
-            "daily_rate": round(vac["hourly_rate"] * vac["daily_hours"], 2) if vac["hourly_rate"] and vac["daily_hours"] else 0,
+            "daily_rate": daily_service_fee(vac["hourly_rate"], vac["daily_hours"],
+                                             vac.get("monthly_total"), vac.get("actual_count"),
+                                             vac.get("service_type")),
             "overtime_warnings": [],
         })
         entry["absence_dates"].add(work_date)

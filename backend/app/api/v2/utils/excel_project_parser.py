@@ -583,7 +583,8 @@ def _detect_contract_columns(headers: list[str]) -> dict[str, int]:
             col_map["hourly_rate"] = i
         elif "月度合价" in h_lower or "合价" in h_lower:
             col_map["monthly_total"] = i
-        elif "中间卡" in h_lower:
+        elif "中间卡" in h_lower or "中间打卡" in h_lower:
+            # 兼容两种表头写法：「中间卡时间」/「中间打卡时间」
             col_map["mid_clock"] = i
         elif "实际岗位数" in h_lower or "实际人数" in h_lower or "实际" in h_lower:
             col_map["actual_count"] = i

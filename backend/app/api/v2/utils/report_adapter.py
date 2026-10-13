@@ -208,12 +208,13 @@ def _build_attendance_details(
             _e_min = _to_min_val(sched.get("shift_end_time", ""))
             if _s_min is not None:
                 _s_buf = max(0, _s_min - 120)
+                # 显式判 None：_to_min_val 对 00:0x 返回 0（falsy），or 兜底会误丢零点整的合法打卡
                 raw_clocks = [t for t in raw_clocks
-                              if (_to_min_val(t) or -1) >= _s_buf]
+                              if (m := _to_min_val(t)) is not None and m >= _s_buf]
             if _e_min is not None:
                 _e_buf = _e_min + 120
                 raw_next_clocks = [t for t in raw_next_clocks
-                                   if (_to_min_val(t) or 9999) <= _e_buf]
+                                   if (m := _to_min_val(t)) is not None and m <= _e_buf]
 
         def _sort_key(t: str) -> int:
             m = re.search(r"(\d{1,2}):(\d{2})", str(t))

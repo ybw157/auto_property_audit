@@ -166,6 +166,45 @@ def resolve_cross_midnight(field_raw: str, start: str, end: str) -> bool:
     return sm > em
 
 
+# 月均天数常数（365 ÷ 12）。保安岗缺勤/缺岗日服务费权威口径的分母。
+MONTH_AVG_DAYS = 30.42
+
+
+def daily_service_fee(hourly_rate, daily_hours, monthly_total, actual_count, service_type) -> float:
+    """缺勤/缺岗的日服务费（计费基数，缺编系数在此之上另乘）。
+
+    保安岗（权威口径）：无工时单价概念，
+        日费 = 月合价 ÷ 30.42 ÷ 名额数
+    - 月合价粒度歧义用一致性检验消解：与「工时单价×日时长×30.42」比对，
+      相差 ≤5% 说明月合价是单人月价（不除名额，如南通夜班巡逻 6000/人）；
+      与「×名额数」相差 ≤5% 说明月合价是多名额合计（除名额，
+      如南京金鹰世界进出口固定岗 51800=7人）；
+      两边都不一致按单人月价理解；
+    - 一天 24h 的岗位（上一休一）名额按 2 计——月合价覆盖 2 个轮换人；
+    - 月合价缺失/为 0 时兜底：工时单价 × 日时长。
+
+    保洁等其他服务类型保持原口径：工时单价 × 日时长。
+    """
+    hr = float(hourly_rate or 0)
+    dh = float(daily_hours or 0)
+    mt = float(monthly_total or 0)
+    ac = int(actual_count or 0)
+    if service_type == "保安" and mt > 0:
+        single = hr * dh * MONTH_AVG_DAYS  # 单人月价（按工时单价口径推）
+        if single > 0 and abs(mt - single) / single <= 0.05:
+            heads = 1  # 月合价 ≈ 单人月价
+        elif single > 0 and ac > 1 and abs(mt - single * ac) / (single * ac) <= 0.05:
+            heads = ac  # 月合价 ≈ 多名额合计
+        elif single > 0:
+            heads = 1  # 数据两边都不一致：按单人月价理解
+        else:
+            heads = ac if ac > 0 else 1  # 工时单价缺失无法校验，信任名额数
+        if dh >= 20:  # 24h 岗位（上一休一）：月合价覆盖 2 个轮换名额
+            heads *= 2
+        return round(mt / MONTH_AVG_DAYS / heads, 2)
+    return round(hr * dh, 2)
+
+
 def shift_clock_minutes(clock_times: list[str], shift: Shift) -> list[int]:
     """将打卡时间转为分钟数，处理跨天班次（次日凌晨打卡 +1440）。"""
     start = parse_time_value(shift.start_time or "08:00")
@@ -510,6 +549,16 @@ def normalize_position_name(text: Any) -> str:
     return result
 
 
+def _norm_24h(time_text: str) -> str:
+    """把 24:xx 归一为 00:xx（24:00 即次日零点）。
+
+    strptime 不接受 24 小时制的 24（%H 范围 0-23），编制表里写成
+    (24:00,4:00) 的窗口不归一化会在后续 parse_time_value 解析失败被静默跳过。
+    """
+    m = re.match(r"^24:(\d{2})$", time_text.strip())
+    return f"00:{m.group(1)}" if m else time_text
+
+
 def parse_mid_clock_time(mid_clock_time: str) -> list[tuple[str, str, int]]:
     """解析中间卡时间字段，返回 [(开始时间, 结束时间, 打卡次数), ...]。
 
@@ -549,8 +598,8 @@ def parse_mid_clock_time(mid_clock_time: str) -> list[tuple[str, str, int]]:
             seg,
         )
         if match:
-            start_time = match.group(1)
-            end_time = match.group(2)
+            start_time = _norm_24h(match.group(1))
+            end_time = _norm_24h(match.group(2))
             clock_count = 1 if is_bracketed else 2
             result.append((start_time, end_time, clock_count))
 
@@ -565,7 +614,11 @@ REST_MARKERS = {"", "休息", "休", "调休", "无", "-", "/", "—", "×", "x"
 # 请假类（有正当原因缺勤，不计入缺岗、也不扣款，按忽略处理）
 LEAVE_MARKERS = {"请假", "病假", "事假", "年假", "婚假", "丧假", "产假", "陪产假", "工伤", "年休"}
 # 缺岗标记（显式写明 = 确定缺岗，直接计入扣款侧）
-SHORTAGE_MARKERS = {"缺岗", "旷工", "未到岗", "空岗", "缺编", "未到", "无故缺岗", "脱岗"}
+SHORTAGE_MARKERS = {"缺岗", "旷工", "未到岗", "空岗", "缺编", "未到", "无故缺岗", "脱岗", "缺勤"}
+
+# 「缺勤N」编号变体（排班员用它区分同日多岗缺勤）：缺勤1、缺勤2 ...
+# 注意必须在 split_employee_cell 之前拦截，否则会被当成员工姓名
+SHORTAGE_PATTERN = re.compile(r"^缺勤\d*$")
 
 
 def split_employee_cell(value: Any) -> list[str]:
@@ -602,7 +655,7 @@ def classify_schedule_cell(raw: Any) -> dict:
         return {"kind": "rest", "names": [], "raw": text}
     if text in LEAVE_MARKERS:
         return {"kind": "leave", "names": [], "raw": text}
-    if text in SHORTAGE_MARKERS:
+    if text in SHORTAGE_MARKERS or SHORTAGE_PATTERN.match(text):
         return {"kind": "shortage", "names": [], "raw": text}
     names = split_employee_cell(text)
     if names:
