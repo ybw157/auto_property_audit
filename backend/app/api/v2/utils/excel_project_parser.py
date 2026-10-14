@@ -25,6 +25,23 @@ from app.api.v2.utils.audit_common import (
 
 SCHEDULE_ALIASES = ["排班表", "排班", "排班情况", "考勤表", "月度排班", "班次", "考勤"]
 
+# 管理岗岗位名关键字：排班表岗位名含这些词即视为管理岗，允许休息/请假
+_MANAGEMENT_NAME_KEYWORDS = ("领班", "主管", "经理", "班长")
+
+
+def _is_management_position(position: Position) -> bool:
+    """判断是否为管理岗位：岗位名含 领班/主管/经理/班长，或 position_type 含「管理」。
+
+    普通保洁合同无休息日，排班表只允许填人名或缺岗；管理岗不受此限制。
+    """
+    name = str(position.position_name or "")
+    pt = str(position.position_type or "")
+    if any(kw in name for kw in _MANAGEMENT_NAME_KEYWORDS):
+        return True
+    if "管理" in pt:
+        return True
+    return False
+
 # 排班表岗位名 → 合同编制表岗位名 的映射
 SCHEDULE_TO_CONTRACT_NAME = {
     "领班": "领班",
@@ -85,6 +102,39 @@ def _infer_month_from_filename(filename: str) -> str:
         year = 2026
         return f"{year}-{month:02d}"
     return ""
+
+
+def _validate_no_rest_for_regular_positions(
+    position_infos: list[PositionInfo], service_type: str
+) -> None:
+    """保安/保洁排班表只允许填人名或缺岗，空格/休息/请假一律报错拒绝上传。
+
+    合同约定保安/保洁无休息日，排班表里非管理岗的单元格只能是：
+    - 人名（出勤）
+    - 缺岗
+    空格 / 休息 / 请假 视为违规，解析阶段直接报错，要求用户修正后重新上传。
+    管理岗位（领班/主管/经理/班长 或 position_type 含「管理」）不受此限制。
+    """
+    if not any(t in str(service_type or "") for t in ("保洁", "保安")):
+        return
+    errors: list[str] = []
+    for pi in position_infos:
+        for p in pi.positions:
+            if _is_management_position(p):
+                continue
+            for slot in p.slots:
+                for work_date, cells in slot.daily.items():
+                    for cell in cells:
+                        status = cell.get("status", "")
+                        if status in ("休息", "请假"):
+                            errors.append(
+                                f"业态「{pi.business_type}」岗位「{p.position_name}」"
+                                f"{work_date} 排班为「{status}」"
+                            )
+    if errors:
+        raise ValueError(
+            "保安/保洁岗位合同无休息日，排班表只允许填写人名或「缺岗」"
+        )
 
 
 def parse_project_excel(
@@ -154,6 +204,9 @@ def parse_project_excel(
     unmatched = _attach_slots_to_positions(result, slot_tuples)
     if unmatched:
         print(f"[解析] {unmatched} 个排班槽位未匹配到编制表岗位（已生成占位岗位保留数据）")
+
+    # --- 5. 校验：普通保洁排班表只允许填人名或缺岗，空格/休息/请假报错拒绝上传 ---
+    _validate_no_rest_for_regular_positions(result, service_type)
 
     return result
 
@@ -632,6 +685,8 @@ def _parse_contract_positions(ws) -> list[tuple[str, Position]]:
             "合同编制表缺少必需的列：" + "、".join(missing) +
             "。请核对表头命名（如「岗位名称」「业态」）。"
         )
+    if "mid_clock" not in col_map:
+        raise ValueError("合同编制表缺少必需的列：中间卡时间")
     pos_name_idx = col_map["position_name"]
     biz_idx = col_map["business_type"]
 
