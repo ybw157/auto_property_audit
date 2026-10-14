@@ -372,7 +372,10 @@ def _calc_late_early_minutes(
 
     late = max(0, actual_in - start_min)
     if is_cross_midnight and end_min <= start_min:
-        actual_out = actual_out % 1440 if actual_out > 1440 else actual_out
+        # 注意必须 >=1440：次日 00:00:xx 的卡 time_to_minutes=0，+1440 后恰好等于 1440，
+        # 用 >1440 会漏掉这一临界（不取模 → early=end-1440 为负 → 误判为无早退），
+        # 导致"次日只有 00:00 附近一张卡（实为中卡）、真正下班卡缺失"的班次漏判。
+        actual_out = actual_out % 1440 if actual_out >= 1440 else actual_out
         early = max(0, end_min - actual_out)
     else:
         early = max(0, end_min - actual_out)
