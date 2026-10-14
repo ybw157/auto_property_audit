@@ -7,7 +7,7 @@ import re
 
 import openpyxl
 
-from app.api.v2.utils.bi_mapping import resolve_project_from_bi_path
+from app.api.v2.utils.bi_mapping import resolve_project_from_bi_path, bi_path_belongs_to_project
 
 
 def parse_attendance_excel(
@@ -61,8 +61,11 @@ def parse_attendance_excel(
         # 使用映射表解析项目名
         project = resolve_project_from_bi_path(org_path) or org_path
 
-        # 如果指定了过滤项目，只保留匹配的记录
-        if filter_project and project != filter_project:
+        # 如果指定了过滤项目，只保留匹配的记录。
+        # 共用 BI 源场景（如昆山住宅与昆山金鹰天地共用昆山金鹰国际打卡源）：
+        # 解析名归到共享源项目，但行的组织路径属于过滤项目的路径列表时同样保留。
+        if filter_project and project != filter_project \
+                and not bi_path_belongs_to_project(org_path, filter_project):
             continue
 
         attendance = {}

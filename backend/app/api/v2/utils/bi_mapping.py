@@ -254,3 +254,37 @@ def resolve_project_from_bi_path(bi_path: str) -> str | None:
 
 def get_bi_paths_for_project(project_name: str) -> list[str]:
     return PROJECT_BI_MAPPING.get(project_name, [])
+
+
+# --------------------------------------------------------------------------
+# 读侧共享：同一 BI 组织路径服务多个项目时（如昆山住宅与昆山金鹰天地共用
+# 「昆山金鹰国际」打卡源），键项目的审核/报告连带读取共享源项目的 BI 记录。
+# 存储仍只归到解析出的规范项目名（共享源）名下一份，不产生重复数据。
+# --------------------------------------------------------------------------
+BI_PROJECT_SHARED_SOURCE: dict[str, list[str]] = {
+    "昆山住宅": ["昆山金鹰天地"],
+}
+
+
+def get_bi_read_projects(project_name: str) -> list[str]:
+    """读取某项目 BI 时应覆盖的项目名列表：自身 + 共享源（自身在前，去重）。"""
+    names = [project_name] if project_name else []
+    for src in BI_PROJECT_SHARED_SOURCE.get(project_name, []):
+        if src not in names:
+            names.append(src)
+    return names
+
+
+def bi_path_belongs_to_project(bi_path: str, project_name: str) -> bool:
+    """判断一条 BI 组织路径是否归属指定项目（复用映射表的精确/前缀/反向前缀规则）。
+
+    用于导入过滤：共用 BI 源的项目（如昆山住宅）导入时，行的组织路径解析后
+    归到共享源项目（昆山金鹰天地），但仍应判定为归属本项目而保留。
+    """
+    if not bi_path or not project_name:
+        return False
+    bi_path = bi_path.strip()
+    for p in PROJECT_BI_MAPPING.get(project_name, []):
+        if bi_path == p or bi_path.startswith(p + "/") or p.startswith(bi_path + "/"):
+            return True
+    return False

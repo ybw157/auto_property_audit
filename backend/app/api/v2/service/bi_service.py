@@ -35,9 +35,15 @@ def import_bi_excel(bi_month: str, file_content: bytes, project_name: str = "") 
             }
 
         count = save_bi_records(bi_month, records)
+        message = f"导入成功，共 {count} 条记录" + (f"（项目：{project_name}）" if project_name else "")
+        # 共用 BI 源场景：记录归入共享源项目名下，提示操作员数据实际归属
+        sources = sorted({r.get("project_name") for r in records
+                          if r.get("project_name") and r["project_name"] != project_name})
+        if project_name and sources:
+            message += f"；与其他项目共用一个 BI 数据源，考勤记录归入：{'、'.join(sources)}"
         return {
             "count": count,
-            "message": f"导入成功，共 {count} 条记录" + (f"（项目：{project_name}）" if project_name else ""),
+            "message": message,
         }
     finally:
         if os.path.exists(file_path):

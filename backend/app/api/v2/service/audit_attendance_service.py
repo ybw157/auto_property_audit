@@ -279,7 +279,10 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                     for cell in cells:
                         status = cell.get("status", "")
                         if status == "缺岗":
-                            slot_ident = slot.area or f"槽位{slot.slot_index}"
+                            # 槽位标识必须含 slot_index：同岗位同区域的多槽位
+                            # （如南京金鹰世界 13 个「写字楼楼层保洁」槽位区域全是
+                            # 「ABC开放楼层区域」）仅用区域会再次坍缩成一条
+                            slot_ident = f"{slot.area}#{slot.slot_index}" if slot.area else f"槽位{slot.slot_index}"
                             key = (p.position_name, slot_ident, work_date)
                             if key not in vacancies:
                                 vacancies[key] = {

@@ -173,14 +173,8 @@ MONTH_AVG_DAYS = 30.42
 def daily_service_fee(hourly_rate, daily_hours, monthly_total, actual_count, service_type) -> float:
     """缺勤/缺岗的日服务费（计费基数，缺编系数在此之上另乘）。
 
-    保安岗（权威口径）：无工时单价概念，
-        日费 = 月合价 ÷ 30.42 ÷ 名额数
-    - 月合价粒度歧义用一致性检验消解：与「工时单价×日时长×30.42」比对，
-      相差 ≤5% 说明月合价是单人月价（不除名额，如南通夜班巡逻 6000/人）；
-      与「×名额数」相差 ≤5% 说明月合价是多名额合计（除名额，
-      如南京金鹰世界进出口固定岗 51800=7人）；
-      两边都不一致按单人月价理解；
-    - 一天 24h 的岗位（上一休一）名额按 2 计——月合价覆盖 2 个轮换人；
+    保安岗（权威口径，2026-10-14 用户拍板）：无工时单价概念，
+        日费 = 月合价 ÷ 30.42
     - 月合价缺失/为 0 时兜底：工时单价 × 日时长。
 
     保洁等其他服务类型保持原口径：工时单价 × 日时长。
@@ -188,20 +182,8 @@ def daily_service_fee(hourly_rate, daily_hours, monthly_total, actual_count, ser
     hr = float(hourly_rate or 0)
     dh = float(daily_hours or 0)
     mt = float(monthly_total or 0)
-    ac = int(actual_count or 0)
     if service_type == "保安" and mt > 0:
-        single = hr * dh * MONTH_AVG_DAYS  # 单人月价（按工时单价口径推）
-        if single > 0 and abs(mt - single) / single <= 0.05:
-            heads = 1  # 月合价 ≈ 单人月价
-        elif single > 0 and ac > 1 and abs(mt - single * ac) / (single * ac) <= 0.05:
-            heads = ac  # 月合价 ≈ 多名额合计
-        elif single > 0:
-            heads = 1  # 数据两边都不一致：按单人月价理解
-        else:
-            heads = ac if ac > 0 else 1  # 工时单价缺失无法校验，信任名额数
-        if dh >= 20:  # 24h 岗位（上一休一）：月合价覆盖 2 个轮换名额
-            heads *= 2
-        return round(mt / MONTH_AVG_DAYS / heads, 2)
+        return round(mt / MONTH_AVG_DAYS, 2)
     return round(hr * dh, 2)
 
 
@@ -427,6 +409,74 @@ def get_shift_for_date(
         if wd in weekdays:
             return start, end
     return "", ""
+
+
+# 隐含休息时长的合理区间（小时）。基线段跨度 − 日时长超出该区间时，
+# 视为数据矛盾或基线选错，基线法放弃调整、回退岗位级日时长。
+_WEEKDAY_HOURS_MIN_REST = 0.0
+_WEEKDAY_HOURS_MAX_REST = 3.0
+
+
+def weekday_adjusted_daily_hours(daily_hours: Any, shift_time: Any) -> dict[int, float] | None:
+    """基线法：把岗位级日时长按星期段的班次跨度差，扩展成逐星期时长表。
+
+    背景：合同计费口径的日时长是「净工时」（编制表日时长列，如 13h），
+    而班次时刻跨度是「毛时长」（如 7:30-21:30 = 14h，含约 1h 休息）。
+    当班次按星期分段且各段时长不同（周日至周四 13h / 周五周六 13.5h）时，
+    缺岗扣款若统一按岗位级日时长计，周五六会被少扣。
+
+    方法：净时长(某星期段) = daily_hours + (该段跨度 − 基线段跨度)。
+    依据「各星期段休息时长相同」的弱假设，跨度差即净时长差。
+
+    基线选择规则：
+      1. 覆盖天数最多的星期段为基线（编制表日时长填的就是大多数日子的时长）；
+      2. 隐含休息时长 = 基线跨度 − daily_hours 必须在 [0, 3] 小时内，
+         越界视为数据矛盾，返回 None 由调用方回退；
+      3. 天数平局时选跨度 >= daily_hours 且最接近的一段（隐含休息最短）。
+
+    Returns:
+        {weekday(0=周一..6=周日): 当日净时长}；单段班次或数据不可靠时返回 None。
+    """
+    try:
+        base = float(daily_hours or 0)
+    except (TypeError, ValueError):
+        return None
+    if base <= 0:
+        return None
+
+    shifts = parse_shift_by_weekday(shift_time)
+    if len(shifts) < 2:
+        return None
+
+    spans: list[tuple[list[int], float]] = []
+    for weekdays, start, end in shifts:
+        s = time_to_minutes(parse_time_value(start))
+        e = time_to_minutes(parse_time_value(end))
+        if s is None or e is None:
+            return None
+        if e <= s:
+            e += 24 * 60  # 跨夜班次
+        spans.append((weekdays, (e - s) / 60.0))
+
+    baseline = max(spans, key=lambda x: len(x[0]))
+    top = [sp for sp in spans if len(sp[0]) == len(baseline[0])]
+    if len(top) > 1:
+        cands = [sp for sp in top if sp[1] >= base]
+        baseline = min(cands, key=lambda x: x[1]) if cands else min(top, key=lambda x: x[1])
+    baseline_span = baseline[1]
+
+    rest = baseline_span - base
+    if not (_WEEKDAY_HOURS_MIN_REST <= rest <= _WEEKDAY_HOURS_MAX_REST):
+        return None
+
+    result: dict[int, float] = {}
+    for weekdays, span in spans:
+        hours = base + (span - baseline_span)
+        if hours <= 0:
+            return None
+        for wd in weekdays:
+            result[wd] = round(hours, 4)
+    return result if result else None
 
 
 def strip_position_time_suffix(text: Any) -> str:

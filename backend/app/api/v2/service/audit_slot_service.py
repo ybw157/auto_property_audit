@@ -34,6 +34,7 @@ from app.api.v2.utils.audit_common import (
     get_shift_for_date,
     get_next_date,
     daily_service_fee,
+    weekday_adjusted_daily_hours,
 )
 
 
@@ -352,6 +353,7 @@ def _build_summary(
         for p in pi.positions:
             rate_map[normalize_position_name(p.position_name)] = (
                 p.hourly_rate, p.daily_hours, p.monthly_total, p.actual_count, pi.service_type,
+                p.shift_time,
             )
 
     grouped: dict[tuple[str, int], dict] = {}
@@ -385,8 +387,8 @@ def _build_summary(
 
     summary = []
     for (pos, slot_idx), item in grouped.items():
-        rate, contract_hours, monthly_total, actual_count, service_type = rate_map.get(
-            normalize_position_name(pos), (0.0, 0.0, 0.0, 0, ""))
+        rate, contract_hours, monthly_total, actual_count, service_type, shift_time = rate_map.get(
+            normalize_position_name(pos), (0.0, 0.0, 0.0, 0, "", ""))
         # 班次级时长优先：排班表把全天岗拆成早/晚两行时，缺岗应按「该班次实际时长」计费，
         # 而非合同编制表的全天 daily_hours（否则早班缺勤会按全天 13h 扣，即原 bug）。
         slot_hours = item.get("slot_hours", 0.0)
@@ -394,13 +396,31 @@ def _build_summary(
         # 日服务费统一走 _daily_service_fee（保安=月合价÷30.42÷名额，保洁=工时单价×日时长），
         # 半天槽位按 有效时长/日时长 折算；保洁口径下与「工时单价×有效时长」完全等价。
         fee = daily_service_fee(rate, contract_hours, monthly_total, actual_count, service_type)
-        if fee and contract_hours > 0 and effective_hours > 0:
-            per_day = round(fee * effective_hours / contract_hours, 2)
+        # 星期分段班次的逐日时长（基线法）：仅当未命中班次级时长且分段可靠时启用；
+        # 无分段或数据矛盾时 hours_map 为 None，逐日计费退化为现状的统一 per_day。
+        hours_map = None
+        if slot_hours <= 0 and item["shortage_dates"]:
+            hours_map = weekday_adjusted_daily_hours(contract_hours, shift_time)
+
+        def _per_day(hours: float) -> float:
+            if fee and contract_hours > 0 and hours > 0:
+                return round(fee * hours / contract_hours, 2)
+            return fee if fee else 0.0
+
+        if hours_map:
+            amount = 0.0
+            for ds in item["shortage_dates"]:
+                try:
+                    wd = datetime.strptime(ds, "%Y-%m-%d").weekday()
+                except (ValueError, TypeError):
+                    wd = -1
+                amount += _per_day(hours_map.get(wd, effective_hours))
+            item["shortage_amount"] = round(amount * absence_coefficient, 2)
         else:
-            per_day = fee if fee else 0.0
+            per_day = _per_day(effective_hours)
+            item["shortage_amount"] = round(item["shortage_days"] * per_day * absence_coefficient, 2) if per_day else 0.0
         item["hourly_rate"] = rate
         item["daily_hours"] = effective_hours
-        item["shortage_amount"] = round(item["shortage_days"] * per_day * absence_coefficient, 2) if per_day else 0.0
         item["shortage_rate"] = (
             round(item["shortage_days"] / item["required_days"] * 100, 1)
             if item["required_days"] else 0.0

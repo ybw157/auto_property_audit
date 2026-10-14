@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.api.v2.core.database import get_db, now_text
 from app.api.v2.models.attendance_models import BiAttendance
+from app.api.v2.utils.bi_mapping import get_bi_read_projects
 
 
 def save_bi_attendance(
@@ -118,11 +119,13 @@ def get_bi_upload_history() -> list[dict]:
 def get_bi_by_project(bi_month: str, project_name: str) -> list[dict]:
     db: Session = next(get_db())
     try:
+        # 读侧共享：共用 BI 源的项目（如昆山住宅）连带读取共享源项目的记录
+        read_names = get_bi_read_projects(project_name) or [project_name]
         rows = (
             db.query(BiAttendance)
             .filter(
                 BiAttendance.bi_month == bi_month,
-                BiAttendance.project_name == project_name,
+                BiAttendance.project_name.in_(read_names),
             )
             .all()
         )
