@@ -36,6 +36,7 @@ from app.api.v2.utils.audit_common import (
     normalize_employee_name,
     parse_position_shifts,
     get_shift_for_date,
+    weekday_adjusted_daily_hours,
     parse_time_value,
     time_to_minutes,
     parse_mid_clock_time,
@@ -270,6 +271,9 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
         for p in pi.positions:
             shifts = parse_position_shifts(p.position_name, p.shift_time)
             mid_clock_windows = parse_mid_clock_time(p.mid_clock_time)
+            # 基线法逐日净时长（星期分段班次时启用）：周五六等长班日的缺岗/缺勤
+            # 按当日实际时长计费，而非全月统一 daily_hours
+            weekday_hours = weekday_adjusted_daily_hours(p.daily_hours, shifts=shifts)
             for slot in p.slots:
                 for work_date, cells in slot.daily.items():
                     start, end = get_shift_for_date(shifts, work_date)
@@ -297,6 +301,7 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                                     "service_type": pi.service_type,
                                     "is_cross_midnight": auto_cross,
                                     "mid_clock_windows": mid_clock_windows,
+                                    "weekday_hours": weekday_hours,
                                 }
                             continue
                         for name in cell.get("names", []):
@@ -313,6 +318,7 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                                     "service_type": pi.service_type,
                                     "is_cross_midnight": auto_cross,
                                     "mid_clock_windows": mid_clock_windows,
+                                    "weekday_hours": weekday_hours,
                                 }
                                 key = (nn, work_date)
                                 if key not in index:
@@ -333,6 +339,32 @@ def _build_bi_index(bi_records: list[dict], audit_month: str) -> dict[tuple[str,
                 continue
             index[(name, iso)].extend(_parse_clock_times(clocks or []))
     return index
+
+
+def _absence_daily_rate(sched: dict, work_date: str, base_fee: float) -> float:
+    """按基线法取缺勤/缺岗当日的日服务费。
+
+    sched/vac 携带 weekday_hours（星期分段班次的逐日净时长表，由
+    _build_schedule_index 注入）；无表或数据不全时回退 base_fee（现状统一口径）。
+    费率换算与槽位缺编汇总（_build_summary）同一口径：fee × 当日时长 ÷ 日时长。
+    """
+    wh = sched.get("weekday_hours") or None
+    if not wh:
+        return base_fee
+    try:
+        contract_hours = float(sched.get("daily_hours") or 0)
+    except (TypeError, ValueError):
+        return base_fee
+    if contract_hours <= 0:
+        return base_fee
+    try:
+        wd = datetime.strptime(work_date, "%Y-%m-%d").weekday()
+    except (ValueError, TypeError):
+        return base_fee
+    hours = wh.get(wd)
+    if not hours or hours <= 0:
+        return base_fee
+    return round(base_fee * hours / contract_hours, 2)
 
 
 def _calc_late_early_minutes(
@@ -779,6 +811,7 @@ def run_attendance_s04_audit(
                             "shift_start": sched["shift_start"], "shift_end": sched["shift_end"],
                             "clock_times": [],
                         })
+                        emp.setdefault("absence_rates", {})[work_date] = _absence_daily_rate(sched, work_date, emp["daily_rate"])
                         continue
 
                     if mid_clock_windows:
@@ -864,6 +897,7 @@ def run_attendance_s04_audit(
                 "shift_end": sched["shift_end"],
                 "clock_times": [],
             })
+            entry.setdefault("absence_rates", {})[work_date] = _absence_daily_rate(sched, work_date, entry["daily_rate"])
             continue
 
         if mid_clock_windows:
@@ -912,6 +946,7 @@ def run_attendance_s04_audit(
             "shift_end": vac["shift_end"],
             "clock_times": [],
         })
+        entry.setdefault("absence_rates", {})[work_date] = _absence_daily_rate(vac, work_date, entry["daily_rate"])
         entry["position"] = pos
 
     deduction_details = []
@@ -928,8 +963,10 @@ def run_attendance_s04_audit(
         absence_records_sorted = sorted(data["absence_records"], key=lambda r: r["date"])
         absence_count = len(absence_dates_list)
         absence_amount = 0.0
-        for _ in absence_dates_list:
-            absence_amount += data["daily_rate"] * absence_multiplier
+        absence_rates = data.get("absence_rates") or {}
+        for _d in absence_dates_list:
+            # 星期分段班次按当日实际时长折算的日费率（无分段时与 daily_rate 一致）
+            absence_amount += absence_rates.get(_d, data["daily_rate"]) * absence_multiplier
 
         missing_deduction = missing_count * missing_amount
         total = missing_deduction + late_total + early_total + round(absence_amount, 2)

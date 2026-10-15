@@ -417,7 +417,7 @@ _WEEKDAY_HOURS_MIN_REST = 0.0
 _WEEKDAY_HOURS_MAX_REST = 3.0
 
 
-def weekday_adjusted_daily_hours(daily_hours: Any, shift_time: Any) -> dict[int, float] | None:
+def weekday_adjusted_daily_hours(daily_hours: Any, shift_time: Any = None, *, shifts: list | None = None) -> dict[int, float] | None:
     """基线法：把岗位级日时长按星期段的班次跨度差，扩展成逐星期时长表。
 
     背景：合同计费口径的日时长是「净工时」（编制表日时长列，如 13h），
@@ -434,6 +434,12 @@ def weekday_adjusted_daily_hours(daily_hours: Any, shift_time: Any) -> dict[int,
          越界视为数据矛盾，返回 None 由调用方回退；
       3. 天数平局时选跨度 >= daily_hours 且最接近的一段（隐含休息最短）。
 
+    Args:
+        daily_hours: 编制表日时长（净工时口径）。
+        shift_time: 班次时间原文（shifts 未传时用它解析）。
+        shifts: 已解析好的星期分段班次（parse_shift_by_weekday / parse_position_shifts
+            的返回值），调用方已持有时传入以避免重复解析、并保持班次来源一致。
+
     Returns:
         {weekday(0=周一..6=周日): 当日净时长}；单段班次或数据不可靠时返回 None。
     """
@@ -444,7 +450,8 @@ def weekday_adjusted_daily_hours(daily_hours: Any, shift_time: Any) -> dict[int,
     if base <= 0:
         return None
 
-    shifts = parse_shift_by_weekday(shift_time)
+    if shifts is None:
+        shifts = parse_shift_by_weekday(shift_time)
     if len(shifts) < 2:
         return None
 
