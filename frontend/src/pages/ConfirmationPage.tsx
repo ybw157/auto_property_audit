@@ -5,6 +5,7 @@ import { useAuditContext } from '../hooks/useAuditContext'
 import { useAuth } from '../hooks/useAuth'
 import { useServiceTypes } from '../hooks/useServiceTypes'
 import { ServiceTypeTabs } from '../components/ServiceTypeTabs'
+import { invalidateDetailCache } from './AuditResults'
 
 interface DeductionDetail {
   employee_name: string
@@ -23,7 +24,7 @@ interface DeductionDetail {
   early_leave_total: number
   mid_clock_issues: any[]
   absence_dates: string[]
-  absence_records?: Array<{ date: string; position?: string; shift_start: string; shift_end: string; clock_times: string[] }>
+  absence_records?: Array<{ date: string; position?: string; shift_start: string; shift_end: string; clock_times: string[]; daily_rate?: number; amount?: number }>
   absence_amount: number
   absence_daily_rate: number
   absence_multiplier?: number
@@ -69,7 +70,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
     for (const r of d.missing_clock_records || []) {
       missingByDate.set(r.date, r)
     }
-    const absenceByDate = new Map<string, { position?: string; shift_start: string; shift_end: string; clock_times: string[] }>()
+    const absenceByDate = new Map<string, { position?: string; shift_start: string; shift_end: string; clock_times: string[]; daily_rate?: number; amount?: number }>()
     for (const r of d.absence_records || []) {
       absenceByDate.set(r.date, r)
     }
@@ -97,7 +98,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
         detail: `漏打卡，扣款50元`,
         shift_time: shift,
         clock_times: clocks,
-        confirmed: conf?.confirmed ?? false,
+        confirmed: conf?.confirmed ?? true,
         note: conf?.note || '',
         free_deduction: conf?.free_deduction ?? false,
       })
@@ -129,7 +130,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
         detail: `${windowTag} 缺${missing}次，扣款${missing * 50}元`,
         shift_time: shift,
         clock_times: clocks,
-        confirmed: conf?.confirmed ?? false,
+        confirmed: conf?.confirmed ?? true,
         note: conf?.note || '',
         free_deduction: conf?.free_deduction ?? false,
       })
@@ -153,7 +154,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
         detail: `${tierLabel}，迟到${late.minutes || 0}分钟，扣款${late.amount || 0}元`,
         shift_time: shift,
         clock_times: clocks,
-        confirmed: conf?.confirmed ?? false,
+        confirmed: conf?.confirmed ?? true,
         note: conf?.note || '',
         free_deduction: conf?.free_deduction ?? false,
       })
@@ -177,7 +178,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
         detail: `${tierLabel}，早退${early.minutes || 0}分钟，扣款${early.amount || 0}元`,
         shift_time: shift,
         clock_times: clocks,
-        confirmed: conf?.confirmed ?? false,
+        confirmed: conf?.confirmed ?? true,
         note: conf?.note || '',
         free_deduction: conf?.free_deduction ?? false,
       })
@@ -185,10 +186,11 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
     for (const dateStr of d.absence_dates || []) {
       const confKey = `absence|${d.employee_name}|${dateStr}`
       const conf = confs[confKey]
-      const dailyRate = d.absence_daily_rate || 0
+      const rec = absenceByDate.get(dateStr)
+      // 星期分段班次的按日费率优先（如周五六 13.5h 与周中 13h 不同价）
+      const dailyRate = Number(rec?.daily_rate ?? d.absence_daily_rate ?? 0)
       const multiplier = Number(d.absence_multiplier || 2.5)
       const amount = round2(dailyRate * multiplier)
-      const rec = absenceByDate.get(dateStr)
       const shift = rec ? `${rec.shift_start || ''}-${rec.shift_end || ''}` : ''
       const clocks = rec ? (rec.clock_times || []).join('\n') : ''
       records.push({
@@ -202,7 +204,7 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
         detail: `脱岗/缺勤，日服务费${dailyRate}×${multiplier}=${amount}元`,
         shift_time: shift,
         clock_times: clocks,
-        confirmed: conf?.confirmed ?? false,
+        confirmed: conf?.confirmed ?? true,
         note: conf?.note || '',
         free_deduction: conf?.free_deduction ?? false,
       })
@@ -223,6 +225,22 @@ function exceptionBadgeClass(type: string): string {
   if (type === 'late' || type === 'early_leave') return 'bg-orange-100 text-orange-700'
   if (type === 'mid_clock') return 'bg-purple-100 text-purple-700'
   return 'bg-slate-100 text-slate-700'
+}
+
+// ─────────────────────── 勾选草稿（localStorage 差异存储）───────────────────────
+// 草稿语义：审核员未提交定稿前的勾选改动，下次打开页面时恢复。
+// 只存"与基准状态不同"的 key（基准 = 已有确认记录的值，无记录时默认全选），
+// 并附异常记录集合指纹（djb2），重新审核导致记录集合变化时草稿自动失效。
+
+function draftStorageKey(project: string, businessType: string, month: string, serviceType: string): string {
+  return `confirm_draft:${project}:${businessType}:${month}:${serviceType}`
+}
+
+function recordsFingerprint(records: Array<{ key: string }>): string {
+  const s = records.map(r => r.key).sort().join('|')
+  let h = 5381
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0
+  return h.toString(36)
 }
 
 export function ConfirmationPage() {
@@ -292,6 +310,7 @@ export function ConfirmationPage() {
         business_type: auditContext.business_type,
         audit_month: auditContext.audit_month,
         service_type: svc,
+        scope: 'confirmation',  // 裁剪版详情：只含 s04 扣款明细，避免 MB 级全量结果树传输
       })
       const detail = await request<any>(`/api/v2/audit-results/detail?${params}`)
       const resultsJson = typeof detail?.results_json === 'string' ? JSON.parse(detail.results_json) : detail?.results_json
@@ -306,9 +325,33 @@ export function ConfirmationPage() {
       const cMap: Record<string, boolean> = {}
       const fMap: Record<string, boolean> = {}
       for (const r of records) {
-        cMap[r.key] = r.confirmed ?? false
+        // 默认全选：与后端 is_charged 口径一致（未确认的异常默认计入扣款），
+        // 审核员只需取消有异议的行；已有确认历史的行按记录原样呈现
+        cMap[r.key] = r.confirmed ?? true
         fMap[r.key] = r.free_deduction ?? false
       }
+      // 恢复本地草稿：指纹匹配（记录集合未因重新审核而变化）时，把上次未提交的改动盖回去
+      // overrides=确认勾选差异，freeOverrides=免打卡标记差异
+      try {
+        const raw = localStorage.getItem(
+          draftStorageKey(auditContext.project_name, auditContext.business_type, auditContext.audit_month, svc)
+        )
+        if (raw) {
+          const draft = JSON.parse(raw)
+          if (draft?.fp === recordsFingerprint(records)) {
+            if (draft.overrides && typeof draft.overrides === 'object') {
+              for (const [k, v] of Object.entries(draft.overrides)) {
+                if (k in cMap && typeof v === 'boolean') cMap[k] = v
+              }
+            }
+            if (draft.freeOverrides && typeof draft.freeOverrides === 'object') {
+              for (const [k, v] of Object.entries(draft.freeOverrides)) {
+                if (k in fMap && typeof v === 'boolean') fMap[k] = v
+              }
+            }
+          }
+        }
+      } catch { /* 草稿损坏时忽略，按默认全选呈现 */ }
       setConfirmMap(cMap)
       setFreeDeductionMap(fMap)
     } catch (error) {
@@ -317,8 +360,43 @@ export function ConfirmationPage() {
     setLoading(false)
   }
 
+  // 保存草稿：只存与基准状态的差异（确认勾选 + 免打卡标记）；无差异时移除草稿
+  function saveDraft(nextMap: Record<string, boolean>, nextFreeMap?: Record<string, boolean>) {
+    if (!auditContext) return
+    const key = draftStorageKey(
+      auditContext.project_name, auditContext.business_type, auditContext.audit_month, effectiveServiceType
+    )
+    const overrides: Record<string, boolean> = {}
+    for (const r of allRecords) {
+      const base = r.confirmed ?? true
+      const cur = nextMap[r.key] ?? base
+      if (cur !== base) overrides[r.key] = cur
+    }
+    const freeMap = nextFreeMap ?? freeDeductionMap
+    const freeOverrides: Record<string, boolean> = {}
+    for (const r of allRecords) {
+      const base = r.free_deduction ?? false
+      const cur = freeMap[r.key] ?? base
+      if (cur !== base) freeOverrides[r.key] = cur
+    }
+    if (Object.keys(overrides).length === 0 && Object.keys(freeOverrides).length === 0) {
+      localStorage.removeItem(key)
+    } else {
+      localStorage.setItem(key, JSON.stringify({ fp: recordsFingerprint(allRecords), overrides, freeOverrides }))
+    }
+  }
+
+  function clearDraft() {
+    if (!auditContext) return
+    localStorage.removeItem(draftStorageKey(
+      auditContext.project_name, auditContext.business_type, auditContext.audit_month, effectiveServiceType
+    ))
+  }
+
   function toggleConfirm(key: string) {
-    setConfirmMap({ ...confirmMap, [key]: !confirmMap[key] })
+    const next = { ...confirmMap, [key]: !confirmMap[key] }
+    setConfirmMap(next)
+    saveDraft(next)
   }
 
   function getEmployeeFreeUsed(emp: string): number {
@@ -330,7 +408,9 @@ export function ConfirmationPage() {
     if (!record) return
     if (freeDeductionMap[key]) {
       if (confirm('确定取消该记录的免扣状态吗？取消后将重新计入扣款。')) {
-        setFreeDeductionMap({ ...freeDeductionMap, [key]: false })
+        const next = { ...freeDeductionMap, [key]: false }
+        setFreeDeductionMap(next)
+        saveDraft(confirmMap, next)
       }
       return
     }
@@ -345,7 +425,9 @@ export function ConfirmationPage() {
       return
     }
     if (confirm(`确定将"${record.exception_label}"记录设为免打卡吗？\n${record.employee_name} 当前剩余免打卡机会：${freeLimit - used}次`)) {
-      setFreeDeductionMap({ ...freeDeductionMap, [key]: true })
+      const next = { ...freeDeductionMap, [key]: true }
+      setFreeDeductionMap(next)
+      saveDraft(confirmMap, next)
     }
   }
 
@@ -356,7 +438,9 @@ export function ConfirmationPage() {
     for (const r of empRecords) {
       updates[r.key] = !allChecked
     }
-    setConfirmMap({ ...confirmMap, ...updates })
+    const next = { ...confirmMap, ...updates }
+    setConfirmMap(next)
+    saveDraft(next)
   }
 
   function buildConfirmRecords() {
@@ -398,6 +482,8 @@ export function ConfirmationPage() {
     setMessage('')
     try {
       const result = await submitConfirm()
+      clearDraft()  // 定稿成功，草稿使命结束
+      invalidateDetailCache()  // 定稿改写了审核结果，结果页缓存同步失效
       setMessage(`确认已保存，总扣款 ¥${Number(result?.total_deduction ?? 0).toFixed(2)}，正在后台更新报告...`)
       // 后台自动重新生成报告，不阻塞用户操作
       const params = new URLSearchParams({
@@ -425,6 +511,8 @@ export function ConfirmationPage() {
     try {
       // 定稿：异常确认就地改写审核结果。审核结果页与 PDF 报告读的都是这一份。
       const result = await submitConfirm()
+      clearDraft()  // 定稿成功，草稿使命结束
+      invalidateDetailCache()  // 定稿改写了审核结果，结果页缓存同步失效
       setConfirmResult({
         confirmed_count: result?.confirmed_count ?? 0,
         total_deduction: result?.total_deduction ?? 0,

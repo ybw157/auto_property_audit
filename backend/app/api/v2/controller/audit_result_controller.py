@@ -35,10 +35,15 @@ def get_result_detail(
     business_type: str,
     audit_month: str,
     service_type: str = "",
+    scope: str = "",
 ):
-    """获取审核结果详情（service_type 为定位键第四列，必填）。"""
+    """获取审核结果详情（service_type 为定位键第四列，必填）。
+
+    scope="confirmation"：确认页裁剪版，results_json 只含 s04 扣款明细，
+    避免全量结果树（含 slot_details，MB 级）的传输。
+    """
     project_name = resolve_project_name(request, project_name)
-    data = get_audit_result(project_name, business_type, audit_month, service_type)
+    data = get_audit_result(project_name, business_type, audit_month, service_type, scope=scope)
     return Result.ok(data=data)
 
 

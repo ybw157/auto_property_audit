@@ -800,18 +800,24 @@ def recompute_audit_totals(data: dict) -> None:
         detail["early_leave_count"] = len(early_charged)
         detail["early_leave_total"] = round(sum(float(early.get("amount", 0) or 0) for early in early_charged), 2)
 
-        per_absence = round(
-            float(detail.get("absence_daily_rate", 0) or 0)
-            * float(detail.get("absence_multiplier") or rule_cfg.get("absence_penalty_multiplier") or 1.0),
-            2,
+        absence_multiplier_val = float(
+            detail.get("absence_multiplier") or rule_cfg.get("absence_penalty_multiplier") or 1.0
         )
-        absence_count = sum(
-            1
-            for d in (detail.get("absence_dates", []) or [])
-            if is_charged(confs.get(confirm_key("absence", emp, d), {}))
-        )
+        base_rate = float(detail.get("absence_daily_rate", 0) or 0)
+        # 星期分段班次的按日费率（审核时写入 absence_records[].daily_rate；
+        # 历史数据无此字段时回退单一费率，结果与旧口径一致）
+        rate_by_date = {}
+        for _r in (detail.get("absence_records", []) or []):
+            if _r.get("date") and _r.get("daily_rate") is not None:
+                rate_by_date[_r["date"]] = float(_r.get("daily_rate") or 0)
+        absence_count = 0
+        absence_amount = 0.0
+        for d in (detail.get("absence_dates", []) or []):
+            if is_charged(confs.get(confirm_key("absence", emp, d), {})):
+                absence_count += 1
+                absence_amount += rate_by_date.get(d, base_rate) * absence_multiplier_val
         detail["absence_count"] = absence_count
-        detail["absence_amount"] = round(per_absence * absence_count, 2)
+        detail["absence_amount"] = round(absence_amount, 2)
 
         detail["total_deduction"] = round(
             detail["missing_clock_amount"]

@@ -968,6 +968,12 @@ def run_attendance_s04_audit(
             # 星期分段班次按当日实际时长折算的日费率（无分段时与 daily_rate 一致）
             absence_amount += absence_rates.get(_d, data["daily_rate"]) * absence_multiplier
 
+        # 把按日费率写进每条缺勤/缺岗记录，供前端明细、报告适配与定稿重算逐日取率
+        for _r in absence_records_sorted:
+            _rate = absence_rates.get(_r["date"], data["daily_rate"])
+            _r["daily_rate"] = _rate
+            _r["amount"] = round(_rate * absence_multiplier, 2)
+
         missing_deduction = missing_count * missing_amount
         total = missing_deduction + late_total + early_total + round(absence_amount, 2)
 

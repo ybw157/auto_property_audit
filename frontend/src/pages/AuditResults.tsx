@@ -62,6 +62,16 @@ function detailConfirmations(d: Record<string, unknown>): Record<string, Confirm
   return (d.confirmations || {}) as Record<string, ConfirmState>
 }
 
+// 详情内存缓存（stale-while-revalidate）：首次请求后按 项目|业态|月份|服务类型 缓存，
+// 再次进入页面/切换服务类型时先用缓存秒渲染，同时后台静默刷新保证数据新鲜。
+// 仅在内存中（刷新页面后失效），不占用 localStorage 配额（详情可达 MB 级）。
+const detailCache = new Map<string, Record<string, unknown>>()
+
+/** 提交确认/重新审核等会改写结果数据的操作后调用，使缓存失效 */
+export function invalidateDetailCache() {
+  detailCache.clear()
+}
+
 export function AuditResults() {
   const { auditContext, setAuditContext } = useAuditContext()
   const { projectName: userProjectName } = useAuth()
@@ -69,6 +79,9 @@ export function AuditResults() {
   const [rows, setRows] = useState<Record<string, unknown>[]>([])
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(!auditContext)
+  // 详情大请求的独立加载态：auditContext 到位后 loading 即结束，
+  // 若不复用同一状态，detail 请求期间页面会以空数据（全 0）先渲染一帧
+  const [detailLoading, setDetailLoading] = useState(false)
   const [dashboard, setDashboard] = useState({
     attendanceDetails: [] as Record<string, unknown>[],
     positionFulfillment: [] as Record<string, unknown>[],
@@ -173,6 +186,11 @@ export function AuditResults() {
         const midIssues = Array.isArray(d.mid_clock_issues) ? d.mid_clock_issues as Record<string, unknown>[] : []
         const absenceDailyRate = Number(d.absence_daily_rate || 0)
         const absenceMultiplier = Number(d.absence_multiplier || 2.5)
+        // 星期分段班次的按日费率表（后端审核时写入 absence_records[].daily_rate）
+        const absenceRateByDate = new Map<string, number>()
+        for (const ar of (Array.isArray(d.absence_records) ? d.absence_records : []) as Record<string, unknown>[]) {
+          if (ar.date && ar.daily_rate != null) absenceRateByDate.set(String(ar.date), Number(ar.daily_rate))
+        }
 
         for (const date of missingDates) {
           if (!isChargedConf(confs[exceptionConfKey('missing_clock', empName, date)])) continue
@@ -188,8 +206,9 @@ export function AuditResults() {
         }
         for (const date of absenceDates) {
           if (!isChargedConf(confs[exceptionConfKey('absence', empName, date)])) continue
-          const absenceAmount = Number((absenceDailyRate * absenceMultiplier).toFixed(2))
-          rows.push({ employee_name: empName, position, work_date: date, exception_type: '缺勤', deduction_amount: absenceAmount, detail: `日服务费${absenceDailyRate}元×${absenceMultiplier}` })
+          const dayRate = absenceRateByDate.get(date) ?? absenceDailyRate
+          const absenceAmount = Number((dayRate * absenceMultiplier).toFixed(2))
+          rows.push({ employee_name: empName, position, work_date: date, exception_type: '缺勤', deduction_amount: absenceAmount, detail: `日服务费${dayRate}元×${absenceMultiplier}` })
         }
         for (const ld of lateDetails) {
           const lateAmount = Number((Number(ld.amount) || 0).toFixed(2))
@@ -262,6 +281,7 @@ export function AuditResults() {
     // 目标服务类型尚未审核：清空数据并交由页面层提示，无需请求详情
     const opt = serviceTypeOptions.find((o) => o.value === effectiveServiceType)
     if (opt && !opt.hasResult) {
+      setDetailLoading(false)
       setDetailData(null)
       setRows([])
       setDashboard({ attendanceDetails: [], positionFulfillment: [], exceptions: [], attendanceDeductions: [], deductions: [], s04Summary: {}, deductionDetails: [], crossProjectReview: [], crossProjectResolved: [] })
@@ -273,28 +293,52 @@ export function AuditResults() {
       audit_month: auditMonth,
       service_type: effectiveServiceType,
     })
+    const cacheKey = `${projectName}|${businessType}|${auditMonth}|${effectiveServiceType}`
+
+    const applyDetail = (detail: Record<string, unknown>) => {
+      setDetailData(detail)
+      const resultsJson = typeof detail.results_json === 'string' ? JSON.parse(detail.results_json as string) : detail.results_json
+      const parsed = parseResultsJson(resultsJson)
+      setDashboard({
+        attendanceDetails: buildTabRows('attendance-details', parsed),
+        positionFulfillment: buildTabRows('position-fulfillment', parsed),
+        exceptions: buildTabRows('exceptions', parsed),
+        attendanceDeductions: buildTabRows('attendance-deductions', parsed),
+        deductions: buildTabRows('deductions', parsed),
+        s04Summary: parsed.s04.summary as Record<string, unknown> || {},
+        deductionDetails: parsed.deductionDetails,
+        crossProjectReview: parsed.crossProjectReview,
+        crossProjectResolved: parsed.crossProjectResolved,
+      })
+      setRows(buildTabRows(tab, parsed))
+    }
+
+    const cached = detailCache.get(cacheKey)
+    if (cached) {
+      // 有缓存：立即渲染，不显示加载态；随后后台静默刷新
+      applyDetail(cached)
+      setDetailLoading(false)
+      request<Record<string, unknown>>(`/api/v2/audit-results/detail?${params}`)
+        .then((detail) => {
+          detailCache.set(cacheKey, detail)
+          applyDetail(detail)
+        })
+        .catch(() => { /* 后台刷新失败时保留缓存内容，不打扰用户 */ })
+      return
+    }
+
+    setDetailLoading(true)
     request<Record<string, unknown>>(`/api/v2/audit-results/detail?${params}`)
       .then((detail) => {
-        setDetailData(detail)
-        const resultsJson = typeof detail.results_json === 'string' ? JSON.parse(detail.results_json as string) : detail.results_json
-        const parsed = parseResultsJson(resultsJson)
-        setDashboard({
-          attendanceDetails: buildTabRows('attendance-details', parsed),
-          positionFulfillment: buildTabRows('position-fulfillment', parsed),
-          exceptions: buildTabRows('exceptions', parsed),
-          attendanceDeductions: buildTabRows('attendance-deductions', parsed),
-          deductions: buildTabRows('deductions', parsed),
-          s04Summary: parsed.s04.summary as Record<string, unknown> || {},
-          deductionDetails: parsed.deductionDetails,
-          crossProjectReview: parsed.crossProjectReview,
-          crossProjectResolved: parsed.crossProjectResolved,
-        })
-        setRows(buildTabRows(tab, parsed))
+        detailCache.set(cacheKey, detail)
+        applyDetail(detail)
+        setDetailLoading(false)
       })
       .catch(() => {
         setDetailData(null)
         setRows([])
         setDashboard({ attendanceDetails: [], positionFulfillment: [], exceptions: [], attendanceDeductions: [], deductions: [], s04Summary: {}, deductionDetails: [], crossProjectReview: [], crossProjectResolved: [] })
+        setDetailLoading(false)
       })
   }, [auditContext, effectiveServiceType, serviceTypeOptions])
 
@@ -358,17 +402,23 @@ export function AuditResults() {
         <ServiceTypeTabs options={serviceTypeOptions} value={activeServiceType} onChange={setActiveServiceType} />
         {message && <div className="mt-3 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">{message}</div>}
       </div>
-      <AuditDashboard data={dashboard} />
-      <div className="flex gap-2">
-        {tabs.map(([key, label]) => <button key={key} className={key === tab ? 'btn-primary' : 'btn-secondary'} onClick={() => setTab(key)}>{label}</button>)}
-      </div>
-      <DataTable
-        rows={rows}
-        columns={tabColumns[tab]}
-        labels={columnLabels}
-        getRowClassName={getResultRowClassName}
-        renderCell={tab === 'exceptions' ? renderExceptionCell : undefined}
-      />
+      {detailLoading ? (
+        <div className="card p-8 text-center text-sm text-slate-500">数据加载中…</div>
+      ) : (
+        <>
+          <AuditDashboard data={dashboard} />
+          <div className="flex gap-2">
+            {tabs.map(([key, label]) => <button key={key} className={key === tab ? 'btn-primary' : 'btn-secondary'} onClick={() => setTab(key)}>{label}</button>)}
+          </div>
+          <DataTable
+            rows={rows}
+            columns={tabColumns[tab]}
+            labels={columnLabels}
+            getRowClassName={getResultRowClassName}
+            renderCell={tab === 'exceptions' ? renderExceptionCell : undefined}
+          />
+        </>
+      )}
 
       {tab === 'attendance-deductions' && dashboard.attendanceDeductions.some((d) => String(d.exception_type || '') === '漏打卡') && (
         <div className="card p-5">

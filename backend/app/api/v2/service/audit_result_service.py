@@ -1,5 +1,6 @@
 """审核结果业务逻辑。"""
 import re
+import json
 from calendar import monthrange
 from datetime import datetime
 from fastapi import HTTPException
@@ -271,18 +272,50 @@ def _enrich_bi_cross_project(position_infos, bi_records, audit_month):
     return enriched, resolved_list, review_list
 
 
+def _prune_for_confirmation(data: dict) -> dict:
+    """确认页裁剪：results_json 只保留 s04_attendance_audit（扣款明细+汇总）。
+
+    完整结果树含全月×全岗位的 slot_details，大项目 1~1.5MB；确认页只用
+    s04 部分。versions_json/logs_json/summary_json 确认页均不消费，一并摘掉。
+    其它调用方（审核结果页等）不传 scope，行为不变。
+    """
+    payload = data.get("results_json")
+    parsed = payload
+    for _ in range(2):  # 兼容双重编码（JSON 列里存的是 JSON 字符串）
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+                break
+        break
+    s04 = parsed.get("s04_attendance_audit") if isinstance(parsed, dict) else None
+    data["results_json"] = {"s04_attendance_audit": s04 or {}}
+    data["summary_json"] = None
+    data["versions_json"] = None
+    data["logs_json"] = None
+    return data
+
+
 def get_audit_result(
     project_name: str,
     business_type: str,
     audit_month: str,
     service_type: str,
+    scope: str = "",
 ) -> dict:
-    """获取审核结果（按四列定位键，服务类型必填）。"""
+    """获取审核结果（按四列定位键，服务类型必填）。
+
+    scope="confirmation" 时返回裁剪版（仅确认页所需字段，大幅减小传输体积）。
+    """
     service_type = require_service_type(service_type)
     result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
     if not result:
         raise HTTPException(status_code=404, detail=f"未找到「{service_type}」的审核结果")
-    return result.to_dict()
+    data = result.to_dict()
+    if scope == "confirmation":
+        return _prune_for_confirmation(data)
+    return data
 
 
 def list_audit_results(
@@ -290,9 +323,22 @@ def list_audit_results(
     audit_month: str = "",
     business_type: str = "",
 ) -> list[dict]:
-    """列出审核结果：列表查询不走定位键，保持列出全部服务类型（供前端做子分类导航）。"""
+    """列出审核结果：列表查询不走定位键，保持列出全部服务类型（供前端做子分类导航）。
+
+    列表场景只消费元数据（项目/业态/月份/服务类型/状态/版本），
+    剔除 results_json 等大字段——全表 126 行全量返回约 35MB，
+    曾导致服务类型按钮与结果页兜底加载明显变慢。
+    """
     results = audit_result_dao.list_audit_results(project_name, audit_month, business_type)
-    return [r.to_dict() for r in results]
+    slim: list[dict] = []
+    for r in results:
+        d = r.to_dict()
+        d.pop("results_json", None)
+        d.pop("summary_json", None)
+        d.pop("versions_json", None)
+        d.pop("logs_json", None)
+        slim.append(d)
+    return slim
 
 
 def start_audit(

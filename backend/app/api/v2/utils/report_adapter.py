@@ -358,18 +358,22 @@ def _build_attendance_deductions(
             })
 
         # ── 缺勤 ──
-        per_absence = round(
-            float(detail.get("absence_daily_rate", 0) or 0)
-            * float(
-                detail.get("absence_multiplier")
-                or rule_cfg.get("absence_penalty_multiplier")
-                or 1.0
-            ),
-            2,
+        # 星期分段班次的按日费率（审核时写入 absence_records[].daily_rate；
+        # 历史数据无此字段时回退单一费率，与旧口径一致）
+        _mult = float(
+            detail.get("absence_multiplier")
+            or rule_cfg.get("absence_penalty_multiplier")
+            or 1.0
         )
+        _base_rate = float(detail.get("absence_daily_rate", 0) or 0)
+        _rate_by_date = {}
+        for _r in detail.get("absence_records", []) or []:
+            if _r.get("date") and _r.get("daily_rate") is not None:
+                _rate_by_date[_r["date"]] = float(_r.get("daily_rate") or 0)
         for date_str in detail.get("absence_dates", []) or []:
             if not is_charged(confirmations.get(confirm_key("absence", name, date_str), {})):
                 continue
+            per_absence = round(_rate_by_date.get(date_str, _base_rate) * _mult, 2)
             rows.append({
                 "employee_name": name,
                 "position": position,
