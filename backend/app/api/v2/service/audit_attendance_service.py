@@ -297,6 +297,7 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                                     "hourly_rate": p.hourly_rate,
                                     "daily_hours": p.daily_hours,
                                     "monthly_total": p.monthly_total,
+                                    "monthly_rate": p.monthly_rate,
                                     "actual_count": p.actual_count,
                                     "service_type": pi.service_type,
                                     "is_cross_midnight": auto_cross,
@@ -314,6 +315,7 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                                     "hourly_rate": p.hourly_rate,
                                     "daily_hours": p.daily_hours,
                                     "monthly_total": p.monthly_total,
+                                    "monthly_rate": p.monthly_rate,
                                     "actual_count": p.actual_count,
                                     "service_type": pi.service_type,
                                     "is_cross_midnight": auto_cross,
@@ -732,7 +734,7 @@ def run_attendance_s04_audit(
                 "mid_clock_issues": [],
                 "daily_rate": daily_service_fee(sched_list[0]["hourly_rate"], sched_list[0]["daily_hours"],
                                                  sched_list[0].get("monthly_total"), sched_list[0].get("actual_count"),
-                                                 sched_list[0].get("service_type")),
+                                                 sched_list[0].get("service_type"), sched_list[0].get("monthly_rate")),
                 "overtime_warnings": [],
             })
             positions = [s["position"] for s in sched_list]
@@ -800,7 +802,7 @@ def run_attendance_s04_audit(
                         "mid_clock_issues": [],
                         "daily_rate": daily_service_fee(sched["hourly_rate"], sched["daily_hours"],
                                                          sched.get("monthly_total"), sched.get("actual_count"),
-                                                         sched.get("service_type")),
+                                                         sched.get("service_type"), sched.get("monthly_rate")),
                         "overtime_warnings": entry.get("overtime_warnings", []),
                     })
 
@@ -884,7 +886,7 @@ def run_attendance_s04_audit(
             "mid_clock_issues": [],
             "daily_rate": daily_service_fee(sched["hourly_rate"], sched["daily_hours"],
                                              sched.get("monthly_total"), sched.get("actual_count"),
-                                             sched.get("service_type")),
+                                             sched.get("service_type"), sched.get("monthly_rate")),
             "overtime_warnings": [],
         })
 
@@ -935,7 +937,7 @@ def run_attendance_s04_audit(
             "mid_clock_issues": [],
             "daily_rate": daily_service_fee(vac["hourly_rate"], vac["daily_hours"],
                                              vac.get("monthly_total"), vac.get("actual_count"),
-                                             vac.get("service_type")),
+                                             vac.get("service_type"), vac.get("monthly_rate")),
             "overtime_warnings": [],
         })
         entry["absence_dates"].add(work_date)

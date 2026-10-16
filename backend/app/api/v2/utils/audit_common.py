@@ -170,20 +170,24 @@ def resolve_cross_midnight(field_raw: str, start: str, end: str) -> bool:
 MONTH_AVG_DAYS = 30.42
 
 
-def daily_service_fee(hourly_rate, daily_hours, monthly_total, actual_count, service_type) -> float:
+def daily_service_fee(hourly_rate, daily_hours, monthly_total, actual_count, service_type, monthly_rate=0) -> float:
     """缺勤/缺岗的日服务费（计费基数，缺编系数在此之上另乘）。
 
-    保安岗（权威口径，2026-10-14 用户拍板）：无工时单价概念，
-        日费 = 月合价 ÷ 30.42
-    - 月合价缺失/为 0 时兜底：工时单价 × 日时长。
+    保安岗（权威口径）：无工时单价概念，
+        日费 = 岗位单价 ÷ 30.42
+    - 岗位单价（monthly_rate）缺失/为 0 时兜底用月合价 ÷ 30.42（兼容旧编制表）；
+      两者都无时再兜底：工时单价 × 日时长。
 
     保洁等其他服务类型保持原口径：工时单价 × 日时长。
     """
     hr = float(hourly_rate or 0)
     dh = float(daily_hours or 0)
     mt = float(monthly_total or 0)
-    if service_type == "保安" and mt > 0:
-        return round(mt / MONTH_AVG_DAYS, 2)
+    mr = float(monthly_rate or 0)
+    if service_type == "保安":
+        basis = mr if mr > 0 else mt
+        if basis > 0:
+            return round(basis / MONTH_AVG_DAYS, 2)
     return round(hr * dh, 2)
 
 

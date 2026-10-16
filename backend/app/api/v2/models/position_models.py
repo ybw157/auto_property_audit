@@ -42,6 +42,7 @@ class Position:
     monthly_hours: float = 0.0 # 单岗位月总时长
     hourly_rate: float = 0.0 # 工时单价
     monthly_total: float = 0.0 #月度合价
+    monthly_rate: float = 0.0 # 岗位单价（月/元）：保安计费基准，日费=岗位单价÷30.42
     actual_count: int = 0 #实际人数
     mid_clock_time: str = "" #中班打卡时间
     is_cross_midnight: bool = False #是否跨 midnight（由 cross_midnight_raw 推导：=="是"）

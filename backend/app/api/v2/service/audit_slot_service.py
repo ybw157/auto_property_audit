@@ -353,7 +353,7 @@ def _build_summary(
         for p in pi.positions:
             rate_map[normalize_position_name(p.position_name)] = (
                 p.hourly_rate, p.daily_hours, p.monthly_total, p.actual_count, pi.service_type,
-                p.shift_time,
+                p.shift_time, p.monthly_rate,
             )
 
     grouped: dict[tuple[str, int], dict] = {}
@@ -387,15 +387,15 @@ def _build_summary(
 
     summary = []
     for (pos, slot_idx), item in grouped.items():
-        rate, contract_hours, monthly_total, actual_count, service_type, shift_time = rate_map.get(
-            normalize_position_name(pos), (0.0, 0.0, 0.0, 0, "", ""))
+        rate, contract_hours, monthly_total, actual_count, service_type, shift_time, monthly_rate = rate_map.get(
+            normalize_position_name(pos), (0.0, 0.0, 0.0, 0, "", "", 0.0))
         # 班次级时长优先：排班表把全天岗拆成早/晚两行时，缺岗应按「该班次实际时长」计费，
         # 而非合同编制表的全天 daily_hours（否则早班缺勤会按全天 13h 扣，即原 bug）。
         slot_hours = item.get("slot_hours", 0.0)
         effective_hours = slot_hours if slot_hours > 0 else contract_hours
-        # 日服务费统一走 _daily_service_fee（保安=月合价÷30.42÷名额，保洁=工时单价×日时长），
+        # 日服务费统一走 _daily_service_fee（保安=岗位单价÷30.42（月合价兜底），保洁=工时单价×日时长），
         # 半天槽位按 有效时长/日时长 折算；保洁口径下与「工时单价×有效时长」完全等价。
-        fee = daily_service_fee(rate, contract_hours, monthly_total, actual_count, service_type)
+        fee = daily_service_fee(rate, contract_hours, monthly_total, actual_count, service_type, monthly_rate)
         # 星期分段班次的逐日时长（基线法）：仅当未命中班次级时长且分段可靠时启用；
         # 无分段或数据矛盾时 hours_map 为 None，逐日计费退化为现状的统一 per_day。
         hours_map = None

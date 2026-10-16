@@ -627,7 +627,7 @@ def _detect_contract_columns(headers: list[str]) -> dict[str, int]:
         elif "工时单价" in h_lower or "小时单价" in h_lower or "时薪" in h_lower:
             # 明确的小时单价（时薪）—— hourly_rate 的唯一权威来源
             col_map["hourly_rate"] = i
-        elif "月单价" in h_lower or ("单价" in h_lower and "月" in h_lower):
+        elif "岗位单价" in h_lower or ("单价" in h_lower and "月" in h_lower):
             # 「岗位单价（月/元）」= 月单价，绝不能当作时薪：
             # 一旦误当 hourly_rate，daily_rate = 月单价 × 日时长，扣款会被放大数十~数百倍。
             col_map["monthly_rate"] = i
@@ -719,6 +719,7 @@ def _parse_contract_positions(ws) -> list[tuple[str, Position]]:
             monthly_hours=_safe_float(_col("monthly_hours", 0)),
             hourly_rate=_safe_float(_col("hourly_rate", 0)),
             monthly_total=_safe_float(_col("monthly_total", 0)),
+            monthly_rate=_safe_float(_col("monthly_rate", 0)),
             actual_count=int(_safe_float(_col("actual_count", 0))),
             mid_clock_time=_safe_str(_col("mid_clock", "")),
             cross_midnight_raw=_safe_str(_col("cross_midnight", "")),
