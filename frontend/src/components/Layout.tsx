@@ -5,10 +5,11 @@ import type { MenuItem } from '../types'
 
 const menus: MenuItem[] = [
   { key: '/', label: '首页', icon: Home, roles: ['group_admin'] },
-  { key: '/audit', label: 'AI审核', icon: Bot, roles: ['group_admin', 'project_user'] },
-  { key: '/results', label: '审核结果', icon: ClipboardList, roles: ['group_admin', 'project_user'] },
-  { key: '/confirmation', label: '异常确认', icon: CheckSquare, roles: ['group_admin', 'project_user'] },
-  { key: '/reports', label: 'PDF报告', icon: FileText, roles: ['group_admin', 'project_user'] },
+  // AI审核 / 审核结果 / 异常确认 / PDF报告：按需求只对项目账号开放，集团管理员菜单不展示
+  { key: '/audit', label: 'AI审核', icon: Bot, roles: ['project_user'] },
+  { key: '/results', label: '审核结果', icon: ClipboardList, roles: ['project_user'] },
+  { key: '/confirmation', label: '异常确认', icon: CheckSquare, roles: ['project_user'] },
+  { key: '/reports', label: 'PDF报告', icon: FileText, roles: ['project_user'] },
   { key: '/contracts', label: '合同管理', icon: BookOpen, roles: ['group_admin', 'project_user'] },
   { key: '/project-management', label: '项目管理', icon: Building2, roles: ['group_admin'] },
   { key: '/bi-upload', label: 'BI考勤', icon: Upload, roles: ['group_admin'] },

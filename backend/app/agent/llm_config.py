@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 ENV_LLM_API_KEY = "LLM_API_KEY"
 ENV_LLM_BASE_URL = "LLM_BASE_URL"
+ENV_LLM_DASHSCOPE_BASE_URL = "LLM_DASHSCOPE_BASE_URL"
 
 
 @dataclass
@@ -17,6 +18,8 @@ class ModelConfig:
     temperature: float = 0.1
     max_tokens: int = 4096
     description: str = ""
+    # 留空表示走全局 LLM_BASE_URL（OpenAI 兼容地址）
+    base_url: str = ""
 
 
 class ModelRegistry:
@@ -28,10 +31,22 @@ class ModelRegistry:
             description="主力模型：结构化提取、复杂推理",
         ),
         "deepseek-v4-flash": ModelConfig(
-            model_name="deepseek-v4-flash",
+            model_name="deepseek-v4-flash-0731",
             temperature=0.0,
             max_tokens=2048,
-            description="轻量模型：简单任务、快速响应",
+            description="轻量模型：简单任务、快速响应（网关未开放 deepseek-v4-flash，别名指向可用快照）",
+        ),
+        "deepseek-v4-flash-0731": ModelConfig(
+            model_name="deepseek-v4-flash-0731",
+            temperature=0.0,
+            max_tokens=2048,
+            description="轻量模型：deepseek-v4-flash 的可用快照版本",
+        ),
+        "qwen3.7-max": ModelConfig(
+            model_name="qwen3.7-max",
+            temperature=0.1,
+            max_tokens=4096,
+            description="视觉模型：OCR 页面文字提取（高精度，成本较高）",
         ),
         "qwen3.7-plus": ModelConfig(
             model_name="qwen3.7-plus",
@@ -57,6 +72,12 @@ class ModelRegistry:
             max_tokens=4096,
             description="视觉模型备选",
         ),
+        "kimi-k2.5": ModelConfig(
+            model_name="kimi-k2.5",
+            temperature=0.1,
+            max_tokens=4096,
+            description="通用备选模型",
+        ),
         "kimi-k2.6": ModelConfig(
             model_name="kimi-k2.6",
             temperature=0.1,
@@ -81,11 +102,16 @@ class LLMFactory:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         registry: Optional[ModelRegistry] = None,
+        dashscope_base_url: Optional[str] = None,
     ):
         self.api_key = api_key or os.getenv(ENV_LLM_API_KEY, "")
         self.base_url = base_url or os.getenv(ENV_LLM_BASE_URL, "")
+        self.dashscope_base_url = dashscope_base_url or os.getenv(ENV_LLM_DASHSCOPE_BASE_URL, "")
         self.registry = registry or ModelRegistry()
 
+    def _resolve_base_url(self, config: ModelConfig) -> str:
+        """优先模型自带地址，其次全局兼容地址，最后 DashScope 原生地址。"""
+        return config.base_url or self.base_url or self.dashscope_base_url
     def validate(self) -> bool:
         if not self.api_key:
             logger.error(
@@ -117,7 +143,7 @@ class LLMFactory:
             model=config.model_name,
             model_provider="openai",
             api_key=self.api_key,
-            base_url=self.base_url,
+            base_url=self._resolve_base_url(config),
             temperature=kwargs.pop("temperature", config.temperature),
             max_tokens=kwargs.pop("max_tokens", config.max_tokens),
             **kwargs,

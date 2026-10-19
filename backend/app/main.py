@@ -27,6 +27,7 @@ from app.api.v2.controller import (
     contract_controller,
     bi_controller,
     report_controller,
+    dashboard_controller,
 )
 from app.api.v2.core.database import init_db
 from app.api.v2.core.config import settings
@@ -140,6 +141,11 @@ app.include_router(bi_controller.router,
 app.include_router(report_controller.router,
                    prefix="/api/v2",
                    tags=["PDF报告"])
+
+# 驾驶舱
+app.include_router(dashboard_controller.router,
+                   prefix="/api/v2",
+                   tags=["驾驶舱"])
 
 
 @app.get("/")
