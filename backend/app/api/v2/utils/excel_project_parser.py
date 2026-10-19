@@ -1,3 +1,4 @@
+import logging
 """项目 Excel 解析器 — 将项目考勤表解析为 PositionInfo / Position 模型。
 
 表格结构（3 个 Sheet）：
@@ -21,6 +22,8 @@ from app.api.v2.utils.audit_common import (
     position_name_with_shift_tag,
     strip_position_time_suffix,
 )
+
+logger = logging.getLogger(__name__)
 
 
 SCHEDULE_ALIASES = ["排班表", "排班", "排班情况", "考勤表", "月度排班", "班次", "考勤"]
@@ -204,7 +207,7 @@ def parse_project_excel(
     slot_tuples = parse_schedule_sheet(wb, audit_month)
     unmatched = _attach_slots_to_positions(result, slot_tuples)
     if unmatched:
-        print(f"[解析] {unmatched} 个排班槽位未匹配到编制表岗位（已生成占位岗位保留数据）")
+        logger.warning(f"[解析] {unmatched} 个排班槽位未匹配到编制表岗位（已生成占位岗位保留数据）")
 
     # --- 5. 校验：普通保洁排班表只允许填人名或缺岗，空格/休息/请假报错拒绝上传 ---
     _validate_no_rest_for_regular_positions(result, service_type)
@@ -667,7 +670,7 @@ def _parse_contract_positions(ws) -> list[tuple[str, Position]]:
     if "hourly_rate" not in col_map and "monthly_rate" in col_map:
         _mr_idx = col_map["monthly_rate"]
         _mr_name = headers[_mr_idx] if _mr_idx < len(headers) else "?"
-        print(
+        logger.info(
             f"[解析警告] 合同编制表只检测到月单价列「{_mr_name}」，"
             "未找到「工时单价/小时单价/时薪」列；这些小时间费率将解析为 0。"
             "请确认 Excel 是否缺少时薪列，或表头命名是否规范。"

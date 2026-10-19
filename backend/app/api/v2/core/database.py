@@ -1,3 +1,4 @@
+import logging
 import json
 from datetime import datetime
 from typing import Any, Generator
@@ -7,6 +8,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.v2.core.config import settings
 from app.api.v2.models.base import Base
+
+logger = logging.getLogger(__name__)
 
 engine = create_engine(
     settings.database_url,
@@ -186,13 +189,13 @@ def _migrate_audit_result_project_name() -> None:
                 {"new": new, "old": old},
             ).first()
             if exists:
-                print(f"[迁移跳过] audit_results 项目名 {old!r} → {new!r} 会与现存行唯一键冲突，已跳过")
+                logger.warning(f"[迁移跳过] audit_results 项目名 {old!r} → {new!r} 会与现存行唯一键冲突，已跳过")
                 continue
             conn.execute(
                 text("UPDATE audit_results SET project_name = :new WHERE project_name = :old"),
                 {"new": new, "old": old},
             )
-            print(f"[迁移] audit_results 项目名 {old!r} → {new!r}")
+            logger.info(f"[迁移] audit_results 项目名 {old!r} → {new!r}")
 
 
 def _migrate_contract_is_deleted() -> None:

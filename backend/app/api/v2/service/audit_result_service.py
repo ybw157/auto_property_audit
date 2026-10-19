@@ -1,6 +1,7 @@
 """审核结果业务逻辑。"""
-import re
 import json
+import logging
+import re
 from calendar import monthrange
 from datetime import datetime
 from fastapi import HTTPException
@@ -27,6 +28,8 @@ from app.api.v2.utils.audit_common import (
     is_charged,
     recompute_audit_totals,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _load_active_s04_rules(project_name: str, business_type: str, service_type: str):
@@ -357,14 +360,14 @@ def start_audit(
     """
     service_type = require_service_type(service_type)
 
-    print(f"\n{'='*60}")
-    print(f"[审核开始] project_name={project_name}, business_type={business_type}, service_type={service_type}, audit_month={audit_month}")
-    print(f"{'='*60}")
+    logger.info(f"{'='*60}")
+    logger.info(f"[审核开始] project_name={project_name}, business_type={business_type}, service_type={service_type}, audit_month={audit_month}")
+    logger.info(f"{'='*60}")
 
     result = audit_result_dao.get_audit_result(project_name, business_type, audit_month, service_type)
 
     # 1) 加载岗位信息（含排班槽位）
-    print(f"\n[步骤1] 加载岗位信息...")
+    logger.info(f"[步骤1] 加载岗位信息...")
     # service_type 必须参与岗位定位：同一 (项目, 业态, 月份) 下保安与保洁各存一份排班，
     # 否则选「保安」审核会加载保洁的排班，审核结果内容全是保洁岗人员。
     position_info = position_dao.get_position_info(
@@ -374,7 +377,7 @@ def start_audit(
         # 区分失败原因，精准提示用户下一步操作（绝不回退取用另一类服务的数据）
         if position_info is not None:
             # 记录存在但岗位列表为空 → Excel 解析出的岗位数为 0
-            print(f"  - [岗位缺失] 业态 {business_type!r}/{service_type!r} 有记录但岗位列表为空（解析结果为空）")
+            logger.warning(f"  - [岗位缺失] 业态 {business_type!r}/{service_type!r} 有记录但岗位列表为空（解析结果为空）")
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -388,7 +391,7 @@ def start_audit(
             project_name, business_type, audit_month
         )
         if available_sts:
-            print(
+            logger.info(
                 f"  - [服务类型不匹配] service_type={service_type!r} 无数据；"
                 f"该项目 {audit_month} {business_type!r} 下已有的服务类型为: {available_sts}"
             )
@@ -405,7 +408,7 @@ def start_audit(
         # 该范围下完全没数据 → 继续查其他业态
         uploaded_types = position_dao.list_uploaded_business_types(project_name, audit_month)
         if uploaded_types:
-            print(
+            logger.info(
                 f"  - [岗位缺失] business_type={business_type!r} 无匹配；"
                 f"该项目 {audit_month} 已上传的业态为: {uploaded_types}"
             )
@@ -417,28 +420,28 @@ def start_audit(
                     "请在项目选择处切换到对应业态后再审核（无需重新上传 Excel）。"
                 ),
             )
-        print(f"  - [岗位缺失] 该项目 {audit_month} 尚未上传任何岗位数据")
+        logger.warning(f"  - [岗位缺失] 该项目 {audit_month} 尚未上传任何岗位数据")
         raise HTTPException(
             status_code=400,
             detail="未找到该项目的岗位数据，请先上传岗位/排班 Excel",
         )
-    print(f"  - 岗位数量: {len(position_info.positions)}")
+    logger.info(f"  - 岗位数量: {len(position_info.positions)}")
     for p in position_info.positions:
-        print(f"  - 岗位: {p.position_name}, 排班槽位数: {len(p.slots)}, 小时费率: {p.hourly_rate}")
+        logger.info(f"  - 岗位: {p.position_name}, 排班槽位数: {len(p.slots)}, 小时费率: {p.hourly_rate}")
 
     # 2) 加载同项目同月份 BI 考勤
-    print(f"\n[步骤2] 加载 BI 考勤数据 (audit_month={audit_month}, project_name={project_name})...")
+    logger.info(f"[步骤2] 加载 BI 考勤数据 (audit_month={audit_month}, project_name={project_name})...")
     bi_records = bi_dao.get_bi_by_project(audit_month, project_name)
     if not bi_records:
         raise HTTPException(
             status_code=400,
             detail="未找到该项目的 BI 考勤数据，请先导入 BI 考勤",
         )
-    print(f"  - BI 记录数: {len(bi_records)}")
+    logger.info(f"  - BI 记录数: {len(bi_records)}")
     for rec in bi_records[:5]:
-        print(f"  - 员工: {rec.get('employee_name')}, 工号: {rec.get('employee_id')}, 打卡天数: {len(rec.get('attendance', {}))}")
+        logger.info(f"  - 员工: {rec.get('employee_name')}, 工号: {rec.get('employee_id')}, 打卡天数: {len(rec.get('attendance', {}))}")
     if len(bi_records) > 5:
-        print(f"  - ... 还有 {len(bi_records) - 5} 条记录")
+        logger.info(f"  - ... 还有 {len(bi_records) - 5} 条记录")
 
     # 2.5) 加载下月1号 BI 数据，合并到当月记录中
     # 跨夜班次（如 22:00-06:00）月底最后一天的下班卡打在下月1号，
@@ -446,15 +449,15 @@ def start_audit(
     # 只对当月最后一天有跨夜班次的员工执行合并，避免影响正常白班员工
     cross_night_employees = _find_cross_night_employees_on_last_day([position_info], audit_month)
     if cross_night_employees:
-        print(f"  - 当月最后一天有跨夜班次的员工: {cross_night_employees}")
+        logger.info(f"  - 当月最后一天有跨夜班次的员工: {cross_night_employees}")
         next_month = _next_month(audit_month)
         if next_month:
             next_bi_records = bi_dao.get_bi_by_project(next_month, project_name)
             if next_bi_records:
-                print(f"  - 加载下月({next_month}) BI 数据: {len(next_bi_records)} 条，合并1号打卡...")
+                logger.info(f"  - 加载下月({next_month}) BI 数据: {len(next_bi_records)} 条，合并1号打卡...")
                 bi_records = _merge_next_month_bi(bi_records, next_bi_records, audit_month, cross_night_employees)
             else:
-                print(f"  - 下月({next_month}) 无 BI 数据，跳过合并")
+                logger.warning(f"  - 下月({next_month}) 无 BI 数据，跳过合并")
 
     # 2.6) 跨项目代班兜底：排班中出现的人员若不在本项目 BI 子集，按姓名到当月全量 BI 检索
     #      - 仅匹配 1 人 → 直接并入 bi_records（标记来源项目）
@@ -463,16 +466,16 @@ def start_audit(
         [position_info], bi_records, audit_month
     )
     if cross_sub_resolved:
-        print(f"  - 跨项目代班自动归并 {len(cross_sub_resolved)} 人: "
+        logger.info(f"  - 跨项目代班自动归并 {len(cross_sub_resolved)} 人: "
               + ", ".join(r["schedule_name"] + f"(←{r['source_project_name']})" for r in cross_sub_resolved))
     if cross_sub_review:
-        print(f"  - 跨项目代班需人工复核 {len(cross_sub_review)} 人: "
+        logger.info(f"  - 跨项目代班需人工复核 {len(cross_sub_review)} 人: "
               + ", ".join(r["schedule_name"] for r in cross_sub_review))
 
     # 3) 跑槽位级三源审核（排班表 × BI 打卡）
     # 岗位缺编扣款 = 缺岗天数 × 日服务费 × 合同缺编系数，
     # 故先在激活合同里取系数再传入槽位审核
-    print(f"\n[步骤3] 执行槽位级三源审核...")
+    logger.info(f"[步骤3] 执行槽位级三源审核...")
     absence_coefficient = get_absence_coefficient(_load_active_s04_rules(project_name, business_type, service_type))
     audit_out = run_slot_audit([position_info], bi_records, audit_month, absence_coefficient)
     # 跨项目代班兜底结果随审核输出落库，供前端展示与人工复核
@@ -480,18 +483,18 @@ def start_audit(
     audit_out["cross_project_substitute_review"] = cross_sub_review
     slot_details = audit_out.get("slot_details", [])
     summary = audit_out.get("summary", [])
-    print(f"  - 槽位审核记录数: {len(slot_details)}")
-    print(f"  - 岗位汇总数: {len(summary)}")
+    logger.info(f"  - 槽位审核记录数: {len(slot_details)}")
+    logger.info(f"  - 岗位汇总数: {len(summary)}")
     for s in summary:
-        print(f"  - 岗位: {s.get('position')}, 槽位: {s.get('slot_index')}, 应出勤: {s.get('required_days')}, 正常: {s.get('normal_days')}, 缺岗: {s.get('shortage_days')}, 减岗: {s.get('reduction_days')}, 待复核: {s.get('pending_days')}")
+        logger.info(f"  - 岗位: {s.get('position')}, 槽位: {s.get('slot_index')}, 应出勤: {s.get('required_days')}, 正常: {s.get('normal_days')}, 缺岗: {s.get('shortage_days')}, 减岗: {s.get('reduction_days')}, 待复核: {s.get('pending_days')}")
 
     # 4) 加载合同 S04 考勤管理规则
-    print(f"\n[步骤4] 加载合同 S04 规则...")
+    logger.info(f"[步骤4] 加载合同 S04 规则...")
     contracts = contract_dao.get_contracts(project_name, business_type)
-    print(f"  - 找到合同数: {len(contracts)}")
+    logger.info(f"  - 找到合同数: {len(contracts)}")
     s04_rules = _load_active_s04_rules(project_name, business_type, service_type)
     if s04_rules:
-        print(f"  - S04 规则: {s04_rules}")
+        logger.info(f"  - S04 规则: {s04_rules}")
 
     missing_fields = []
     if not s04_rules:
@@ -512,7 +515,7 @@ def start_audit(
 
     # 5) 跑 S04 考勤管理扣款审核（人员级：迟到/早退/漏打卡/缺岗）
     if s04_rules:
-        print(f"\n[步骤5] 执行 S04 考勤扣款审核...")
+        logger.info(f"[步骤5] 执行 S04 考勤扣款审核...")
         s04_audit = run_attendance_s04_audit(
             [position_info], bi_records, s04_rules, audit_month
         )
@@ -522,17 +525,17 @@ def start_audit(
             (s04_audit.get("s04_rules", {}) or {}).get("absence_penalty_multiplier")
             or get_absence_coefficient(s04_rules)
         )
-        print(f"  - 缺岗扣款倍数: 当日服务费 × {absence_multiplier}")
-        print(f"  - 漏打卡扣款: {s04_summary.get('total_missing_clock_amount', 0)}")
-        print(f"  - 迟到扣款: {s04_summary.get('total_late_amount', 0)}")
-        print(f"  - 早退扣款: {s04_summary.get('total_early_leave_amount', 0)}")
-        print(f"  - 缺岗扣款: {s04_summary.get('total_absence_amount', 0)}")
-        print(f"  - 总扣款: {s04_summary.get('total_deduction', 0)}")
+        logger.info(f"  - 缺岗扣款倍数: 当日服务费 × {absence_multiplier}")
+        logger.info(f"  - 漏打卡扣款: {s04_summary.get('total_missing_clock_amount', 0)}")
+        logger.info(f"  - 迟到扣款: {s04_summary.get('total_late_amount', 0)}")
+        logger.info(f"  - 早退扣款: {s04_summary.get('total_early_leave_amount', 0)}")
+        logger.info(f"  - 缺岗扣款: {s04_summary.get('total_absence_amount', 0)}")
+        logger.info(f"  - 总扣款: {s04_summary.get('total_deduction', 0)}")
     else:
         audit_out["s04_attendance_audit"] = {"message": "无 S04 规则，跳过"}
 
     # 6) 落库（UPSERT）
-    print(f"\n[步骤6] 落库...")
+    logger.info(f"[步骤6] 落库...")
     # 项目名称一律取其原始值（与上传编制表时写入 position_infos 的项目名完全一致），
     # 不再做「去掉"项目"二字」的替换 —— 旧逻辑会把落库名（如"长春金鹰世界"）与
     # 查询/比对用的原值（如"长春金鹰世界项目"）折成两把键：既让版本号永不递增，
@@ -554,11 +557,11 @@ def start_audit(
         confirmed_at="",
     )
     audit_result_dao.save_audit_result(out)
-    print(f"  - 版本: {new_version}, 已保存")
+    logger.info(f"  - 版本: {new_version}, 已保存")
 
-    print(f"\n{'='*60}")
-    print(f"[审核完成] 总槽位数: {len(slot_details)}, 总扣款: {s04_summary.get('total_deduction', 0) if s04_rules else 0}")
-    print(f"{'='*60}\n")
+    logger.info(f"{'='*60}")
+    logger.info(f"[审核完成] 总槽位数: {len(slot_details)}, 总扣款: {s04_summary.get('total_deduction', 0) if s04_rules else 0}")
+    logger.info(f"{'='*60}\n")
 
     # 统一口径：
     # 分子 = 异常记录数（个人考勤异常总条数：漏打卡+中间卡+迟到+早退+缺勤）

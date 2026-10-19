@@ -1,9 +1,12 @@
+import logging
 """报告元数据 DAO —— 用 SQLite 跟踪已生成的 PDF 报告。"""
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from app.api.v2.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 _DB_PATH = Path(settings.storage_dir) / "reports" / "reports_meta.db"
 
@@ -64,7 +67,7 @@ def save_report(
     try:
         cleanup_expired_reports()
     except Exception as e:  # 清理失败不应影响本次保存结果
-        print(f"[report_dao] 过期报告清理失败: {e}")
+        logger.warning(f"[report_dao] 过期报告清理失败: {e}")
     return report_id
 
 
@@ -135,7 +138,7 @@ def cleanup_expired_reports(max_age_days: int = REPORT_RETENTION_DAYS) -> int:
             if fp.exists():
                 fp.unlink()
         except OSError as e:
-            print(f"[report_dao] 删除过期报告文件失败 {fp}: {e}")
+            logger.warning(f"[report_dao] 删除过期报告文件失败 {fp}: {e}")
         conn2 = _conn()
         try:
             conn2.execute("DELETE FROM generated_reports WHERE id=?", (r["id"],))

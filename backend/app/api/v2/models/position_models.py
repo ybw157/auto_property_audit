@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime
 
@@ -6,6 +7,8 @@ from sqlalchemy import String, Integer, DateTime, JSON, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -56,7 +59,7 @@ class Position:
             try:
                 slots_data.append(asdict(s) if hasattr(s, "__dataclass_fields__") else s)
             except Exception as e:
-                print(f"[Position.to_dict] 序列化 slot 失败: {e}, slot={s}")
+                logger.warning(f"[Position.to_dict] 序列化 slot 失败: {e}, slot={s}")
                 slots_data.append({"error": str(e)})
         data["slots"] = slots_data
         return data

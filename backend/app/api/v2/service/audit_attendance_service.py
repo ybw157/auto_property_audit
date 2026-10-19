@@ -27,6 +27,7 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -45,6 +46,8 @@ from app.api.v2.utils.audit_common import (
     daily_service_fee,
     round_money,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _norm_month(audit_month: str) -> str:
@@ -528,7 +531,7 @@ def _classify_late_early(minutes: int, s04_sub_rules: list[dict]) -> tuple[str, 
         key=lambda t: t["max_minutes"],
     )
     if not tiers:
-        print(f"  [告警] 合同细则未配置迟到/早退分档，{minutes} 分钟不执行扣款")
+        logger.warning(f"  [告警] 合同细则未配置迟到/早退分档，{minutes} 分钟不执行扣款")
         return "", 0
 
     over_minutes = _late_over_threshold(s04_sub_rules)
@@ -670,7 +673,7 @@ def run_attendance_s04_audit(
                 max_min = _parse_minutes_from_text(sub.get("name", ""))
             amount = _as_amount(sub.get("amount"))
             if max_min is None or amount is None:
-                print(f"  [告警] 合同细则中档位 {sub.get('name') or code} 缺少有效阈值/金额，已跳过")
+                logger.warning(f"  [告警] 合同细则中档位 {sub.get('name') or code} 缺少有效阈值/金额，已跳过")
                 continue
             s04_sub.append({**sub, "max_minutes": max_min, "amount": amount})
         s04_1 = next((r for r in s04_sub if r.get("code") == "S04-1"), None)
@@ -694,7 +697,7 @@ def run_attendance_s04_audit(
             max_min = _as_positive_int(t.get("max_minutes"))
             amount = _as_amount(t.get("amount"))
             if max_min is None or amount is None:
-                print(f"  [告警] 合同细则迟到/早退第 {i + 1} 档缺少有效阈值或金额，已跳过：{t}")
+                logger.warning(f"  [告警] 合同细则迟到/早退第 {i + 1} 档缺少有效阈值或金额，已跳过：{t}")
                 continue
             valid_tiers.append({"max_minutes": max_min, "amount": amount})
         valid_tiers.sort(key=lambda t: t["max_minutes"])
@@ -749,7 +752,7 @@ def run_attendance_s04_audit(
                     "total_hours": total_hours,
                     "message": f"{name} 在 {work_date} 单日排班工时 {total_hours}h（超 {OVERTIME_THRESHOLD_HOURS}h），当天不执行考勤扣款",
                 })
-                print(f"  [工时异常] {name} {work_date}: 总工时 {total_hours}h, 岗位 {'、'.join(positions)}")
+                logger.warning(f"  [工时异常] {name} {work_date}: 总工时 {total_hours}h, 岗位 {'、'.join(positions)}")
                 continue
             else:
                 # 合法拆分班次：总工时正常，逐条审核每段排班的打卡
