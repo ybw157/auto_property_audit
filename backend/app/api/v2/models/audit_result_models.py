@@ -3,6 +3,7 @@ from sqlalchemy import String, Integer, DateTime, JSON, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
+from ..core.constants import AuditStatus
 
 
 class AuditResult(Base):
@@ -26,7 +27,7 @@ class AuditResult(Base):
         String(50), nullable=False, default="", server_default=""
     )
     audit_month: Mapped[str] = mapped_column(String(10), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="待审核")
+    status: Mapped[str] = mapped_column(String(20), default=AuditStatus.PENDING)
     version: Mapped[int] = mapped_column(Integer, default=1)
     results_json: Mapped[list] = mapped_column(JSON, default=[])
     summary_json: Mapped[list] = mapped_column(JSON, default=[])

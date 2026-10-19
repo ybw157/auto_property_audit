@@ -20,6 +20,12 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def get_db() -> Generator[Session, None, None]:
+    """FastAPI Depends 专用（请求作用域，框架负责关闭）。
+
+    注意：非请求作用域（DAO 层函数）请直接用 SessionLocal() 并配 try/finally 关闭；
+    不要用 next(get_db())——生成器表达式结束后会被 GC 立即触发 finally，
+    导致拿到的 session 先被关闭一次、使用时再惰性重连（双开关损耗）。
+    """
     db = SessionLocal()
     try:
         yield db

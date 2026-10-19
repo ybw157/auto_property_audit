@@ -1,13 +1,13 @@
 """用户数据访问层。"""
 from sqlalchemy.orm import Session
 
-from app.api.v2.core.database import get_db, now_text
+from app.api.v2.core.database import SessionLocal, now_text
 from app.api.v2.core.security import hash_password, verify_password
 from app.api.v2.models.user import User
 
 
 def get_by_username(username: str) -> User | None:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         return db.query(User).filter(
             User.username == username,
@@ -25,7 +25,7 @@ def verify_user(username: str, password: str) -> User | None:
 
 
 def update_password(username: str, new_password: str) -> None:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         db.query(User).filter(User.username == username).update({
             User.password_hash: hash_password(new_password),
@@ -37,7 +37,7 @@ def update_password(username: str, new_password: str) -> None:
 
 
 def get_by_id(user_id: int) -> User | None:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         return db.query(User).filter(User.id == user_id).first()
     finally:
@@ -45,7 +45,7 @@ def get_by_id(user_id: int) -> User | None:
 
 
 def list_users() -> list[User]:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         return db.query(User).order_by(User.id).all()
     finally:
@@ -53,7 +53,7 @@ def list_users() -> list[User]:
 
 
 def save_user(user: User) -> int:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         existing = db.query(User).filter(User.username == user.username).first()
         if existing:

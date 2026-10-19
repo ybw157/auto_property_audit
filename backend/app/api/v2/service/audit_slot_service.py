@@ -23,6 +23,7 @@ from typing import Any
 from app.api.v2.models.position_models import PositionInfo
 from app.api.v2.models.position_models import ScheduleSlot
 from app.api.v2.models.schedule_models import Shift
+from app.api.v2.core.constants import AuditStatus
 from app.api.v2.utils.audit_common import (
     normalize_employee_name,
     normalize_position_name,
@@ -347,7 +348,7 @@ def run_slot_audit(
                         slot_details.append(detail)
 
     summary = _build_summary(slot_details, position_infos, absence_coefficient)
-    return {"slot_details": slot_details, "summary": summary, "status": "已审核"}
+    return {"slot_details": slot_details, "summary": summary, "status": AuditStatus.AUDITED}
 
 
 def _build_summary(

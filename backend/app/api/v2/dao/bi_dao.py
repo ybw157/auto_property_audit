@@ -2,7 +2,7 @@
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.api.v2.core.database import get_db, now_text
+from app.api.v2.core.database import SessionLocal, now_text
 from app.api.v2.models.attendance_models import BiAttendance
 from app.api.v2.utils.bi_mapping import get_bi_read_projects
 
@@ -15,7 +15,7 @@ def save_bi_attendance(
     position: str,
     attendance: dict,
 ) -> int:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         existing = (
             db.query(BiAttendance)
@@ -67,7 +67,7 @@ def save_bi_records(bi_month: str, records: list[dict]) -> int:
 
 
 def get_bi_by_month(bi_month: str) -> list[dict]:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         rows = (
             db.query(BiAttendance)
@@ -90,7 +90,7 @@ def get_bi_by_month(bi_month: str) -> list[dict]:
 
 
 def get_bi_upload_history() -> list[dict]:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         rows = (
             db.query(
@@ -117,7 +117,7 @@ def get_bi_upload_history() -> list[dict]:
 
 
 def get_bi_by_project(bi_month: str, project_name: str) -> list[dict]:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         # 读侧共享：共用 BI 源的项目（如昆山住宅）连带读取共享源项目的记录
         read_names = get_bi_read_projects(project_name) or [project_name]

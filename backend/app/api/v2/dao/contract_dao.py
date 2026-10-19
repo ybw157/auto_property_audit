@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from app.api.v2.core.database import get_db, now_text
+from app.api.v2.core.database import SessionLocal, now_text
 from app.api.v2.core.validators import require_service_type
 from app.api.v2.models.contract_models import ContractRecord
 
@@ -53,7 +53,7 @@ def get_latest_active_contract(
 
 
 def save_contract(contract: ContractRecord) -> int:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         db.add(contract)
         db.commit()
@@ -64,7 +64,7 @@ def save_contract(contract: ContractRecord) -> int:
 
 
 def get_contracts(project_name: str = "", business_type: str = "") -> list[ContractRecord]:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         q = db.query(ContractRecord).filter(ContractRecord.is_deleted == 0)  # type: ignore[arg-type]
         if project_name:
@@ -77,7 +77,7 @@ def get_contracts(project_name: str = "", business_type: str = "") -> list[Contr
 
 
 def get_contract_by_id(contract_id: int) -> ContractRecord | None:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         return db.query(ContractRecord).filter(
             ContractRecord.id == contract_id,
@@ -88,7 +88,7 @@ def get_contract_by_id(contract_id: int) -> ContractRecord | None:
 
 
 def get_contract_by_original_name(original_name: str) -> ContractRecord | None:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         return db.query(ContractRecord).filter(
             ContractRecord.original_name == original_name,
@@ -99,7 +99,7 @@ def get_contract_by_original_name(original_name: str) -> ContractRecord | None:
 
 
 def get_contract_by_original_name_all(original_name: str) -> ContractRecord | None:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         return db.query(ContractRecord).filter(
             ContractRecord.original_name == original_name,
@@ -114,7 +114,7 @@ def get_contract_by_name_and_bt(original_name: str, business_type: str, project_
     用于“解析入库”的去重：同名同业态视为同一份合同（覆盖更新），
     同名不同业态视为第二份合同（新建）。
     """
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         q = db.query(ContractRecord).filter(
             ContractRecord.original_name == original_name,
@@ -129,7 +129,7 @@ def get_contract_by_name_and_bt(original_name: str, business_type: str, project_
 
 
 def restore_contract(contract_id: int, **fields) -> bool:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         update_data = {getattr(ContractRecord, k): v for k, v in fields.items() if hasattr(ContractRecord, k)}
         update_data[ContractRecord.is_deleted] = 0
@@ -142,7 +142,7 @@ def restore_contract(contract_id: int, **fields) -> bool:
 
 
 def update_contract_full(contract_id: int, **fields) -> bool:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         update_data = {getattr(ContractRecord, k): v for k, v in fields.items() if hasattr(ContractRecord, k)}
         update_data[ContractRecord.updated_at] = now_text()
@@ -154,7 +154,7 @@ def update_contract_full(contract_id: int, **fields) -> bool:
 
 
 def update_contract_rules(contract_id: int, rules: list) -> bool:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         db.query(ContractRecord).filter(ContractRecord.id == contract_id).update({
             ContractRecord.rules: rules,
@@ -167,7 +167,7 @@ def update_contract_rules(contract_id: int, rules: list) -> bool:
 
 
 def update_contract_extract(contract_id: int, extract_status: str, rules: list | None = None) -> bool:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         update_data: dict = {
             ContractRecord.extract_status: extract_status,
@@ -196,7 +196,7 @@ def update_contract_extract_metadata(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> bool:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         update_data: dict = {
             ContractRecord.extract_status: extract_status,
@@ -229,7 +229,7 @@ def update_contract_extract_metadata(
 
 
 def update_contract_status(contract_id: int, status: str, is_active: int = 1) -> bool:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         db.query(ContractRecord).filter(ContractRecord.id == contract_id).update({
             ContractRecord.status: status,
@@ -243,7 +243,7 @@ def update_contract_status(contract_id: int, status: str, is_active: int = 1) ->
 
 
 def delete_contract(contract_id: int) -> bool:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         db.query(ContractRecord).filter(ContractRecord.id == contract_id).update({
             ContractRecord.is_deleted: 1,

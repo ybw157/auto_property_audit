@@ -2,6 +2,8 @@
 from pydantic import BaseModel
 from typing import Optional
 
+from app.api.v2.core.constants import AuditStatus
+
 
 # ========== 认证 ==========
 class LoginRequest(BaseModel):
@@ -44,7 +46,7 @@ class RuleCenterUpdateRequest(BaseModel):
 
 
 class RuleCenterStatusUpdateRequest(BaseModel):
-    status: str = "已确认"
+    status: str = AuditStatus.CONFIRMED
 
 
 # ========== 合同文件 ==========

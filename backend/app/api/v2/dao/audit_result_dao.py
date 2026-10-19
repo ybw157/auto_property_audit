@@ -1,7 +1,7 @@
 """审核结果数据库访问层。"""
 from sqlalchemy.orm import Session
 
-from app.api.v2.core.database import get_db, now_text
+from app.api.v2.core.database import SessionLocal, now_text
 from app.api.v2.core.validators import require_service_type
 from app.api.v2.models.audit_result_models import AuditResult
 
@@ -22,7 +22,7 @@ def save_audit_result(result: AuditResult) -> int:
     否则后审核的服务类型会覆盖先审核的记录。
     """
     result.service_type = require_service_type(result.service_type)
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         existing = (
             _scope_q(
@@ -65,7 +65,7 @@ def get_audit_result(
     service_type: str,
 ) -> AuditResult | None:
     """按定位键取该服务类型唯一的审核结果；服务类型必填，缺失即报错。"""
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         q = _scope_q(
             db.query(AuditResult).filter(
@@ -91,7 +91,7 @@ def list_audit_results(
     service_type 在这里是**可选过滤条件**，空表示「列出全部服务类型」，
     供前端构建服务类型导航使用；它不参与写入，因此不存在互相覆盖的问题。
     """
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         q = db.query(AuditResult)
         if project_name:
@@ -119,7 +119,7 @@ def update_audit_result_status(
     service_type: str,
     **kwargs,
 ) -> None:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         values = {AuditResult.status: status, AuditResult.updated_at: now_text()}
         for key, value in kwargs.items():
@@ -146,7 +146,7 @@ def update_audit_result_fields(
     service_type: str,
     **fields,
 ) -> bool:
-    db: Session = next(get_db())
+    db: Session = SessionLocal()
     try:
         update_data = {}
         for k, v in fields.items():

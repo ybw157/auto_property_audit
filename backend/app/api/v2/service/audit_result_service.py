@@ -4,6 +4,7 @@ import json
 from calendar import monthrange
 from datetime import datetime
 from fastapi import HTTPException
+from app.api.v2.core.constants import AuditStatus
 from app.api.v2.core.database import json_dumps, now_text
 from app.api.v2.core.result import Result
 from app.api.v2.core.validators import require_service_type
@@ -542,7 +543,7 @@ def start_audit(
         business_type=business_type,
         service_type=service_type,
         audit_month=audit_month,
-        status="已审核",
+        status=AuditStatus.AUDITED,
         version=new_version,
         results_json=json_dumps(audit_out),
         summary_json=json_dumps(audit_out["summary"]),
@@ -580,7 +581,7 @@ def start_audit(
             "business_type": business_type,
             "audit_month": audit_month,
             "version": new_version,
-            "status": "已审核",
+            "status": AuditStatus.AUDITED,
             "slot_count": schedule_task_count,
             "exception_count": exception_count,
             "summary": audit_out["summary"],
@@ -850,7 +851,7 @@ def confirm_exceptions(
         results_json=json_dumps(data),
         confirmed_by=confirmed_by,
         confirmed_at=now_text(),
-        status="已确认",
+        status=AuditStatus.CONFIRMED,
     )
 
     return {
