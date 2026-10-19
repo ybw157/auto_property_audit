@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, date, time, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from ..models.schedule_models import Shift
@@ -170,6 +171,16 @@ def resolve_cross_midnight(field_raw: str, start: str, end: str) -> bool:
 MONTH_AVG_DAYS = 30.42
 
 
+def round_money(x) -> float:
+    """金额四舍五入到小数点后两位（ROUND_HALF_UP；费用域均为非负数）。
+
+    注意不能用内置 round()：它是银行家舍入（round(2.675, 2) 会偏），不是真四舍五入。
+    全系统金额口径（2026-10-19 用户拍板）：费率/行金额保留两位小数，
+    每天最终扣款先取两位小数再求和，保证行显示与合计恒等。
+    """
+    return float(Decimal(str(float(x or 0))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
 def daily_service_fee(hourly_rate, daily_hours, monthly_total, actual_count, service_type, monthly_rate=0) -> float:
     """缺勤/缺岗的日服务费（计费基数，缺编系数在此之上另乘）。
 
@@ -179,6 +190,8 @@ def daily_service_fee(hourly_rate, daily_hours, monthly_total, actual_count, ser
       两者都无时再兜底：工时单价 × 日时长。
 
     保洁等其他服务类型保持原口径：工时单价 × 日时长。
+
+    返回值为两位小数（四舍五入），保证行显示与合计口径一致。
     """
     hr = float(hourly_rate or 0)
     dh = float(daily_hours or 0)
@@ -187,8 +200,8 @@ def daily_service_fee(hourly_rate, daily_hours, monthly_total, actual_count, ser
     if service_type == "保安":
         basis = mr if mr > 0 else mt
         if basis > 0:
-            return round(basis / MONTH_AVG_DAYS, 2)
-    return round(hr * dh, 2)
+            return round_money(basis / MONTH_AVG_DAYS)
+    return round_money(hr * dh)
 
 
 def shift_clock_minutes(clock_times: list[str], shift: Shift) -> list[int]:
@@ -822,11 +835,13 @@ def recompute_audit_totals(data: dict) -> None:
             if _r.get("date") and _r.get("daily_rate") is not None:
                 rate_by_date[_r["date"]] = float(_r.get("daily_rate") or 0)
         absence_count = 0
-        absence_amount = 0.0
+        absence_amount = 0
         for d in (detail.get("absence_dates", []) or []):
             if is_charged(confs.get(confirm_key("absence", emp, d), {})):
                 absence_count += 1
-                absence_amount += rate_by_date.get(d, base_rate) * absence_multiplier_val
+                # 每天最终扣款取整到元（四舍五入），与审核时/前端显示口径一致，
+                # 保证各行显示之和与总额恒等
+                absence_amount += round_money(rate_by_date.get(d, base_rate) * absence_multiplier_val)
         detail["absence_count"] = absence_count
         detail["absence_amount"] = round(absence_amount, 2)
 

@@ -187,13 +187,12 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
       const confKey = `absence|${d.employee_name}|${dateStr}`
       const conf = confs[confKey]
       const rec = absenceByDate.get(dateStr)
-      // 星期分段班次的按日费率优先（如周五六 13.5h 与周中 13h 不同价）
+      const mark = (rec as { mark?: string } | undefined)?.mark || '缺岗'
+      const isReduction = mark === '减岗'
+      // 金额口径（2026-10-19）：四舍五入到两位小数，与后端逐日取整求和恒等
       const dailyRate = Number(rec?.daily_rate ?? d.absence_daily_rate ?? 0)
       const multiplier = Number(d.absence_multiplier || 2.5)
       const amount = round2(dailyRate * multiplier)
-      // 缺勤记录按 mark 区分「缺岗 / 减岗」（减岗=计划性减员，1 倍日服务费）
-      const mark = (rec as { mark?: string } | undefined)?.mark || '缺岗'
-      const isReduction = mark === '减岗'
       const shift = rec ? `${rec.shift_start || ''}-${rec.shift_end || ''}` : ''
       const clocks = rec ? (rec.clock_times || []).join('\n') : ''
       records.push({

@@ -210,6 +210,7 @@ export function AuditResults() {
         for (const date of absenceDates) {
           if (!isChargedConf(confs[exceptionConfKey('absence', empName, date)])) continue
           const dayRate = absenceRateByDate.get(date) ?? absenceDailyRate
+          // 金额口径（2026-10-19）：四舍五入到两位小数，与后端逐日取整求和恒等
           const absenceAmount = Number((dayRate * absenceMultiplier).toFixed(2))
           const mark = absenceMarkByDate.get(date)
           const isReduction = mark === '减岗'

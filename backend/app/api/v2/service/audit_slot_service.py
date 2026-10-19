@@ -36,6 +36,7 @@ from app.api.v2.utils.audit_common import (
     get_next_date,
     daily_service_fee,
     weekday_adjusted_daily_hours,
+    round_money,
 )
 
 
@@ -420,7 +421,7 @@ def _build_summary(
 
         def _per_day(hours: float) -> float:
             if fee and contract_hours > 0 and hours > 0:
-                return round(fee * hours / contract_hours, 2)
+                return float(round_money(fee * hours / contract_hours))
             return fee if fee else 0.0
 
         def _weekday_of(ds: str) -> int:
@@ -429,20 +430,22 @@ def _build_summary(
             except (ValueError, TypeError):
                 return -1
 
+        # 每天最终扣款取整到元后求和，保证日明细与合计口径恒等
         if hours_map:
-            amount = 0.0
+            amount = 0
             for ds in item["shortage_dates"]:
-                amount += _per_day(hours_map.get(_weekday_of(ds), effective_hours))
+                amount += round_money(_per_day(hours_map.get(_weekday_of(ds), effective_hours)) * absence_coefficient)
             # 减岗按 1 倍日服务费（不乘缺编系数）
-            red_amount = 0.0
+            red_amount = 0
             for ds in item["reduction_dates"]:
-                red_amount += _per_day(hours_map.get(_weekday_of(ds), effective_hours))
-            item["shortage_amount"] = round(amount * absence_coefficient + red_amount, 2)
+                red_amount += round_money(_per_day(hours_map.get(_weekday_of(ds), effective_hours)))
+            item["shortage_amount"] = amount + red_amount
         else:
             per_day = _per_day(effective_hours)
-            item["shortage_amount"] = round(
-                (item["shortage_days"] * absence_coefficient + item["reduction_days"]) * per_day, 2
-            ) if per_day else 0.0
+            item["shortage_amount"] = (
+                round_money(per_day * absence_coefficient) * item["shortage_days"]
+                + round_money(per_day) * item["reduction_days"]
+            ) if per_day else 0
         item["hourly_rate"] = rate
         item["daily_hours"] = effective_hours
         item["shortage_rate"] = (

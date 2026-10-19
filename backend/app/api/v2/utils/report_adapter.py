@@ -20,6 +20,7 @@ from app.api.v2.utils.audit_common import (
     resolve_cross_midnight,
     parse_position_shifts,
     get_shift_for_date,
+    round_money,
 )
 
 
@@ -382,7 +383,7 @@ def _build_attendance_deductions(
         for date_str in detail.get("absence_dates", []) or []:
             if not is_charged(confirmations.get(confirm_key("absence", name, date_str), {})):
                 continue
-            per_absence = round(_rate_by_date.get(date_str, _base_rate) * _mult, 2)
+            per_absence = round_money(_rate_by_date.get(date_str, _base_rate) * _mult)
             _mk = _mark_by_date2.get(date_str, "缺岗")
             rows.append({
                 "employee_name": name,

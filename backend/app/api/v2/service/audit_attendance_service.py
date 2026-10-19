@@ -43,6 +43,7 @@ from app.api.v2.utils.audit_common import (
     parse_mid_clock_time,
     resolve_cross_midnight,
     daily_service_fee,
+    round_money,
 )
 
 
@@ -369,7 +370,7 @@ def _absence_daily_rate(sched: dict, work_date: str, base_fee: float) -> float:
     hours = wh.get(wd)
     if not hours or hours <= 0:
         return base_fee
-    return round(base_fee * hours / contract_hours, 2)
+    return float(round_money(base_fee * hours / contract_hours))
 
 
 def _calc_late_early_minutes(
@@ -976,17 +977,18 @@ def run_attendance_s04_audit(
         absence_amount = 0.0
         absence_rates = data.get("absence_rates") or {}
         for _d in absence_dates_list:
-            # 星期分段班次按当日实际时长折算的日费率（无分段时与 daily_rate 一致）
-            absence_amount += absence_rates.get(_d, data["daily_rate"]) * row_multiplier
+            # 星期分段班次按当日实际时长折算的日费率（无分段时与 daily_rate 一致）；
+            # 每天最终扣款取整到元，保证各行显示之和与总额恒等
+            absence_amount += round_money(absence_rates.get(_d, data["daily_rate"]) * row_multiplier)
 
         # 把按日费率写进每条缺勤/缺岗记录，供前端明细、报告适配与定稿重算逐日取率
         for _r in absence_records_sorted:
             _rate = absence_rates.get(_r["date"], data["daily_rate"])
             _r["daily_rate"] = _rate
-            _r["amount"] = round(_rate * row_multiplier, 2)
+            _r["amount"] = round_money(_rate * row_multiplier)
 
         missing_deduction = missing_count * missing_amount
-        total = missing_deduction + late_total + early_total + round(absence_amount, 2)
+        total = missing_deduction + late_total + early_total + absence_amount
 
         deduction_details.append({
             "employee_name": name,
