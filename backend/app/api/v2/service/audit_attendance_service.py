@@ -1,7 +1,8 @@
 """S04 考勤管理扣款审核（人员级）。
 
-签到表（Sheet3）单元格四态 → 审核分流：
+签到表（Sheet3）单元格五态 → 审核分流：
 - "缺岗"：确定缺勤，不比对考勤，直接记 S04-4 缺勤扣款
+- "减岗"：计划性减员，同样不比对考勤直接扣款，但仅按 1 倍日服务费（不乘缺编系数）
 - 人名：人来了，比对 BI 考勤打卡，检查上下班卡与中间卡
 - 休息/空：当天该岗无人，跳过
 - 请假：有正当原因，不扣款
@@ -253,13 +254,14 @@ def get_absence_coefficient(s04_rules: dict | None) -> float:
     return coef if coef > 0 else 1.0
 
 
-def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tuple[str, str], list[dict]], dict[tuple[str, str], dict]]:
+def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tuple[str, str], list[dict]], dict[tuple[str, str, str], dict]]:
     """构建 (姓名, 日期) → [排班信息列表] 索引，以及 (岗位, 日期) → 缺岗信息 索引。
 
     关键逻辑：
     - 班次时间按周几分段解析（parse_shift_by_weekday），再根据每个日期的星期
       用 get_shift_for_date 选取当天对应班次。
-    - "缺岗"单元格无论班次能否解析都收入 vacancies（签到表写缺岗=确定缺勤）。
+    - "缺岗"/"减岗"单元格无论班次能否解析都收入 vacancies（签到表写缺岗=确定缺勤；
+      减岗=计划性减员，由 mark 字段区分，扣款时仅按 1 倍日服务费）。
     - 人名单元格同样不因班次解析失败而跳过（人来了就纳入比对）。
     - 同一天同一人出现在多个岗位时，所有候选班次都保留（list 追加，不覆盖）。
     """
@@ -282,7 +284,7 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                     auto_cross = resolve_cross_midnight(p.cross_midnight_raw, start, end)
                     for cell in cells:
                         status = cell.get("status", "")
-                        if status == "缺岗":
+                        if status in ("缺岗", "减岗"):
                             # 槽位标识必须含 slot_index：同岗位同区域的多槽位
                             # （如南京金鹰世界 13 个「写字楼楼层保洁」槽位区域全是
                             # 「ABC开放楼层区域」）仅用区域会再次坍缩成一条
@@ -294,6 +296,7 @@ def _build_schedule_index(position_infos: list[PositionInfo]) -> tuple[dict[tupl
                                     "shift_end": end,
                                     "position": p.position_name,
                                     "slot_ident": slot_ident,
+                                    "mark": status,
                                     "hourly_rate": p.hourly_rate,
                                     "daily_hours": p.daily_hours,
                                     "monthly_total": p.monthly_total,
@@ -917,13 +920,14 @@ def run_attendance_s04_audit(
         _apply_late_early(entry, late, early, s04_sub, work_date, sched, clock_display, all_clocks)
         _check_missing_clockout(entry, is_cross, clocks, next_clocks, all_clocks, work_date, sched, clock_display)
 
-    # 处理缺岗：签到表标记"缺岗"/"缺勤" = 确定缺勤，不比对考勤
+    # 处理缺岗/减岗：签到表标记"缺岗"/"缺勤"/"减岗" = 确定缺勤，不比对考勤
     vacancy_absence_count = 0
     for (pos, slot_ident, work_date), vac in vacancies.items():
         vacancy_absence_count += 1
         # 假员工名带槽位标识：同名岗位的不同槽位缺岗各自成行，
         # 保证同一天同岗位多槽位缺勤按槽位数分别扣款（费率也各自取准）
-        fake_name = f"[缺岗]{pos}({slot_ident})"
+        mark = vac.get("mark", "缺岗")
+        fake_name = f"[{mark}]{pos}({slot_ident})"
         entry = employee_data.setdefault(fake_name, {
             "employee_name": fake_name,
             "position": pos,
@@ -938,6 +942,8 @@ def run_attendance_s04_audit(
             "daily_rate": daily_service_fee(vac["hourly_rate"], vac["daily_hours"],
                                              vac.get("monthly_total"), vac.get("actual_count"),
                                              vac.get("service_type"), vac.get("monthly_rate")),
+            # 减岗行扣款倍数固定 1.0（不乘缺编系数）；缺岗行沿用缺编系数
+            "absence_multiplier_row": 1.0 if mark == "减岗" else absence_multiplier,
             "overtime_warnings": [],
         })
         entry["absence_dates"].add(work_date)
@@ -947,6 +953,7 @@ def run_attendance_s04_audit(
             "shift_start": vac["shift_start"],
             "shift_end": vac["shift_end"],
             "clock_times": [],
+            "mark": mark,
         })
         entry.setdefault("absence_rates", {})[work_date] = _absence_daily_rate(vac, work_date, entry["daily_rate"])
         entry["position"] = pos
@@ -964,17 +971,19 @@ def run_attendance_s04_audit(
         absence_dates_list = sorted(data["absence_dates"])
         absence_records_sorted = sorted(data["absence_records"], key=lambda r: r["date"])
         absence_count = len(absence_dates_list)
+        # 减岗行倍数为 1.0（仅扣 1 倍日服务费）；缺岗/缺勤行沿用缺编系数
+        row_multiplier = data.get("absence_multiplier_row", absence_multiplier)
         absence_amount = 0.0
         absence_rates = data.get("absence_rates") or {}
         for _d in absence_dates_list:
             # 星期分段班次按当日实际时长折算的日费率（无分段时与 daily_rate 一致）
-            absence_amount += absence_rates.get(_d, data["daily_rate"]) * absence_multiplier
+            absence_amount += absence_rates.get(_d, data["daily_rate"]) * row_multiplier
 
         # 把按日费率写进每条缺勤/缺岗记录，供前端明细、报告适配与定稿重算逐日取率
         for _r in absence_records_sorted:
             _rate = absence_rates.get(_r["date"], data["daily_rate"])
             _r["daily_rate"] = _rate
-            _r["amount"] = round(_rate * absence_multiplier, 2)
+            _r["amount"] = round(_rate * row_multiplier, 2)
 
         missing_deduction = missing_count * missing_amount
         total = missing_deduction + late_total + early_total + round(absence_amount, 2)
@@ -999,7 +1008,7 @@ def run_attendance_s04_audit(
             "absence_dates": absence_dates_list,
             "absence_records": absence_records_sorted,
             "absence_daily_rate": data["daily_rate"],
-            "absence_multiplier": absence_multiplier,
+            "absence_multiplier": row_multiplier,
             "absence_amount": round(absence_amount, 2),
             "total_deduction": round(total, 2),
             "overtime_warnings": data.get("overtime_warnings", []),

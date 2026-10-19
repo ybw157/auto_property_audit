@@ -4,7 +4,7 @@
   1. 基础信息      → 业态、外包公司、约定/实际岗位数
                      （不含项目名称：项目名一律取自登录用户，不从 Excel 解析）
   2. 合同编制表    → 每个岗位的编制信息（人员、工时、单价等）
-  3. 排班表(排班情况) → 每个岗位每天排了谁（槽位级，含休息/缺岗/人名三态）
+  3. 排班表(排班情况) → 每个岗位每天排了谁（槽位级，含休息/缺岗/减岗/人名四态）
                        排班表是岗位表的子表，解析后挂到对应 Position.slots 上。
 """
 from pathlib import Path
@@ -107,11 +107,12 @@ def _infer_month_from_filename(filename: str) -> str:
 def _validate_no_rest_for_regular_positions(
     position_infos: list[PositionInfo], service_type: str
 ) -> None:
-    """保安/保洁排班表只允许填人名或缺岗，空格/休息/请假一律报错拒绝上传。
+    """保安/保洁排班表只允许填人名、缺岗或减岗，空格/休息/请假一律报错拒绝上传。
 
     合同约定保安/保洁无休息日，排班表里非管理岗的单元格只能是：
     - 人名（出勤）
-    - 缺岗
+    - 缺岗（确定缺勤，按日服务费 × 缺编系数扣款）
+    - 减岗（计划性减员，按 1 倍日服务费扣款）
     空格 / 休息 / 请假 视为违规，解析阶段直接报错，要求用户修正后重新上传。
     管理岗位（领班/主管/经理/班长 或 position_type 含「管理」）不受此限制。
     """
@@ -133,7 +134,7 @@ def _validate_no_rest_for_regular_positions(
                             )
     if errors:
         raise ValueError(
-            "保安/保洁岗位合同无休息日，排班表只允许填写人名或「缺岗」"
+            "保安/保洁岗位合同无休息日，排班表只允许填写人名、「缺岗」或「减岗」"
         )
 
 
@@ -266,7 +267,7 @@ def parse_schedule_sheet(wb, audit_month: str) -> list[tuple[ScheduleSlot, str, 
             month_fmt = audit_month
         else:
             month_fmt = audit_month
-        kind_to_status = {"person": "出勤", "rest": "休息", "leave": "请假", "shortage": "缺岗"}
+        kind_to_status = {"person": "出勤", "rest": "休息", "leave": "请假", "shortage": "缺岗", "reduction": "减岗"}
         for col_idx, day in day_columns:
             value = _merged_or(values, merged, source_row_no, col_idx)
             cell = classify_schedule_cell(value)

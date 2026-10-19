@@ -5,7 +5,8 @@
 
 判定口径（上游立场：扣的是外包公司的钱，不追问个人）：
 - 空格 / 休息 / 请假  → 当天该岗本就无人，不计审核（不扣）
-- 单元格显式写「缺岗」→ 确定缺岗，计入扣款侧
+- 单元格显式写「缺岗」→ 确定缺岗，计入扣款侧（日服务费 × 缺编系数）
+- 单元格显式写「减岗」→ 计划性减员，确定扣款但仅按 1 倍日服务费（不乘缺编系数）
 - 排了人 X：
     X 当天 BI 有打卡(含跨天拆分)        → 有人（确定）
     X 没打卡，但本岗编制内他人打卡       → 有人（顶班/换班，不扣）
@@ -202,6 +203,7 @@ def _audit_one_slot_day(
         )
 
     has_shortage_marker = any(c.get("status", "") == "缺岗" for c in cells)
+    has_reduction_marker = any(c.get("status", "") == "减岗" for c in cells)
     persons = []
     for c in cells:
         for n in c.get("names", []):
@@ -217,6 +219,15 @@ def _audit_one_slot_day(
             is_shortage=True,
             actual_present=[],
             note="排班表显式标注缺岗",
+        )
+
+    if has_reduction_marker:
+        return _base_detail(
+            scheduled=persons,
+            status="减岗",
+            is_shortage=True,
+            actual_present=[],
+            note="排班表显式标注减岗",
         )
 
     if not persons:
@@ -343,10 +354,10 @@ def _build_summary(
     position_infos: list[PositionInfo],
     absence_coefficient: float = 1.0,
 ) -> list[dict]:
-    """按 (岗位, 槽位序号) 聚合缺岗/待复核统计，并估算缺岗扣款。
+    """按 (岗位, 槽位序号) 聚合缺岗/减岗/待复核统计，并估算缺岗扣款。
 
     absence_coefficient: 缺编扣款倍数（合同字段 contract_deduction_coefficient），
-    缺编扣款 = 缺岗天数 × 日服务费 × 该系数。
+    缺编扣款 = 缺岗天数 × 日服务费 × 该系数 + 减岗天数 × 日服务费 × 1.0。
     """
     rate_map: dict[str, tuple] = {}
     for pi in position_infos:
@@ -366,9 +377,11 @@ def _build_summary(
             "required_days": 0,
             "normal_days": 0,
             "shortage_days": 0,
+            "reduction_days": 0,
             "pending_days": 0,
             "rest_days": 0,
             "shortage_dates": [],
+            "reduction_dates": [],
             "pending_dates": [],
         })
         status = d["status"]
@@ -381,6 +394,9 @@ def _build_summary(
         elif status == "缺岗":
             item["shortage_days"] += 1
             item["shortage_dates"].append(d["work_date"])
+        elif status == "减岗":
+            item["reduction_days"] += 1
+            item["reduction_dates"].append(d["work_date"])
         elif status == "待复核":
             item["pending_days"] += 1
             item["pending_dates"].append(d["work_date"])
@@ -399,7 +415,7 @@ def _build_summary(
         # 星期分段班次的逐日时长（基线法）：仅当未命中班次级时长且分段可靠时启用；
         # 无分段或数据矛盾时 hours_map 为 None，逐日计费退化为现状的统一 per_day。
         hours_map = None
-        if slot_hours <= 0 and item["shortage_dates"]:
+        if slot_hours <= 0 and (item["shortage_dates"] or item["reduction_dates"]):
             hours_map = weekday_adjusted_daily_hours(contract_hours, shift_time)
 
         def _per_day(hours: float) -> float:
@@ -407,18 +423,26 @@ def _build_summary(
                 return round(fee * hours / contract_hours, 2)
             return fee if fee else 0.0
 
+        def _weekday_of(ds: str) -> int:
+            try:
+                return datetime.strptime(ds, "%Y-%m-%d").weekday()
+            except (ValueError, TypeError):
+                return -1
+
         if hours_map:
             amount = 0.0
             for ds in item["shortage_dates"]:
-                try:
-                    wd = datetime.strptime(ds, "%Y-%m-%d").weekday()
-                except (ValueError, TypeError):
-                    wd = -1
-                amount += _per_day(hours_map.get(wd, effective_hours))
-            item["shortage_amount"] = round(amount * absence_coefficient, 2)
+                amount += _per_day(hours_map.get(_weekday_of(ds), effective_hours))
+            # 减岗按 1 倍日服务费（不乘缺编系数）
+            red_amount = 0.0
+            for ds in item["reduction_dates"]:
+                red_amount += _per_day(hours_map.get(_weekday_of(ds), effective_hours))
+            item["shortage_amount"] = round(amount * absence_coefficient + red_amount, 2)
         else:
             per_day = _per_day(effective_hours)
-            item["shortage_amount"] = round(item["shortage_days"] * per_day * absence_coefficient, 2) if per_day else 0.0
+            item["shortage_amount"] = round(
+                (item["shortage_days"] * absence_coefficient + item["reduction_days"]) * per_day, 2
+            ) if per_day else 0.0
         item["hourly_rate"] = rate
         item["daily_hours"] = effective_hours
         item["shortage_rate"] = (

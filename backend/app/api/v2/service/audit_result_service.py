@@ -482,7 +482,7 @@ def start_audit(
     print(f"  - 槽位审核记录数: {len(slot_details)}")
     print(f"  - 岗位汇总数: {len(summary)}")
     for s in summary:
-        print(f"  - 岗位: {s.get('position')}, 槽位: {s.get('slot_index')}, 应出勤: {s.get('required_days')}, 正常: {s.get('normal_days')}, 缺岗: {s.get('shortage_days')}, 待复核: {s.get('pending_days')}")
+        print(f"  - 岗位: {s.get('position')}, 槽位: {s.get('slot_index')}, 应出勤: {s.get('required_days')}, 正常: {s.get('normal_days')}, 缺岗: {s.get('shortage_days')}, 减岗: {s.get('reduction_days')}, 待复核: {s.get('pending_days')}")
 
     # 4) 加载合同 S04 考勤管理规则
     print(f"\n[步骤4] 加载合同 S04 规则...")

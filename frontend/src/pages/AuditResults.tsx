@@ -188,8 +188,11 @@ export function AuditResults() {
         const absenceMultiplier = Number(d.absence_multiplier || 2.5)
         // 星期分段班次的按日费率表（后端审核时写入 absence_records[].daily_rate）
         const absenceRateByDate = new Map<string, number>()
+        // 缺勤记录的缺岗/减岗标记表（absence_records[].mark）
+        const absenceMarkByDate = new Map<string, string>()
         for (const ar of (Array.isArray(d.absence_records) ? d.absence_records : []) as Record<string, unknown>[]) {
           if (ar.date && ar.daily_rate != null) absenceRateByDate.set(String(ar.date), Number(ar.daily_rate))
+          if (ar.date && ar.mark) absenceMarkByDate.set(String(ar.date), String(ar.mark))
         }
 
         for (const date of missingDates) {
@@ -208,7 +211,9 @@ export function AuditResults() {
           if (!isChargedConf(confs[exceptionConfKey('absence', empName, date)])) continue
           const dayRate = absenceRateByDate.get(date) ?? absenceDailyRate
           const absenceAmount = Number((dayRate * absenceMultiplier).toFixed(2))
-          rows.push({ employee_name: empName, position, work_date: date, exception_type: '缺勤', deduction_amount: absenceAmount, detail: `日服务费${dayRate}元×${absenceMultiplier}` })
+          const mark = absenceMarkByDate.get(date)
+          const isReduction = mark === '减岗'
+          rows.push({ employee_name: empName, position, work_date: date, exception_type: isReduction ? '减岗' : '缺勤', deduction_amount: absenceAmount, detail: isReduction ? `减岗（计划性减员），日服务费${dayRate}元×${absenceMultiplier}` : `日服务费${dayRate}元×${absenceMultiplier}` })
         }
         for (const ld of lateDetails) {
           const lateAmount = Number((Number(ld.amount) || 0).toFixed(2))

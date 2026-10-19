@@ -680,6 +680,10 @@ SHORTAGE_MARKERS = {"缺岗", "旷工", "未到岗", "空岗", "缺编", "未到
 # 「缺勤N」编号变体（排班员用它区分同日多岗缺勤）：缺勤1、缺勤2 ...
 # 注意必须在 split_employee_cell 之前拦截，否则会被当成员工姓名
 SHORTAGE_PATTERN = re.compile(r"^缺勤\d*$")
+# 减岗标记（计划性减员：确定扣款，但仅按 1 倍日服务费，不乘缺编系数）
+REDUCTION_MARKERS = {"减岗"}
+# 「减岗N」编号变体，与缺勤N同理，必须在 split_employee_cell 之前拦截
+REDUCTION_PATTERN = re.compile(r"^减岗\d*$")
 
 
 def split_employee_cell(value: Any) -> list[str]:
@@ -703,12 +707,13 @@ def split_employee_cell(value: Any) -> list[str]:
 
 
 def classify_schedule_cell(raw: Any) -> dict:
-    """把排班表的一个单元格识别为四种语义之一。
+    """把排班表的一个单元格识别为五种语义之一。
 
-    返回 {"kind": "rest"|"leave"|"shortage"|"person", "names": [..], "raw": str}
+    返回 {"kind": "rest"|"leave"|"shortage"|"reduction"|"person", "names": [..], "raw": str}
     - rest    : 空 / 休息 / 未排班  → 当天该岗无人，不计入审核
     - leave   : 请假类            → 有正当原因，不计入缺岗、不扣款
-    - shortage: 缺岗/旷工 等显式标记 → 确定缺岗，计入扣款侧
+    - shortage: 缺岗/旷工 等显式标记 → 确定缺岗，计入扣款侧（日服务费 × 缺编系数）
+    - reduction: 减岗显式标记      → 确定扣款，但仅按 1 倍日服务费（不乘缺编系数）
     - person  : 人名              → 用排班姓名作探针，去 BI 反查当天是否打卡
     """
     text = "" if raw is None else str(raw).strip()
@@ -718,6 +723,8 @@ def classify_schedule_cell(raw: Any) -> dict:
         return {"kind": "leave", "names": [], "raw": text}
     if text in SHORTAGE_MARKERS or SHORTAGE_PATTERN.match(text):
         return {"kind": "shortage", "names": [], "raw": text}
+    if text in REDUCTION_MARKERS or REDUCTION_PATTERN.match(text):
+        return {"kind": "reduction", "names": [], "raw": text}
     names = split_employee_cell(text)
     if names:
         return {"kind": "person", "names": names, "raw": text}

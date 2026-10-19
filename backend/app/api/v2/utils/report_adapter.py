@@ -161,8 +161,14 @@ def _build_attendance_details(
                 "type": "早退",
                 "reason": f"早退{int(early.get('minutes', 0) or 0)}分钟",
             })
+        # 缺勤记录按 mark 区分「缺岗 / 减岗」（审核时写入 absence_records[].mark）
+        _mark_by_date = {
+            str(_r.get("date", "")): _r.get("mark", "缺岗")
+            for _r in detail.get("absence_records", []) or []
+        }
         for date_str in detail.get("absence_dates", []) or []:
-            exception_idx[(name, str(date_str))].append({"type": "缺勤", "reason": "缺岗(缺勤)"})
+            _mk = _mark_by_date.get(str(date_str), "缺岗")
+            exception_idx[(name, str(date_str))].append({"type": "缺勤", "reason": f"{_mk}(缺勤)"})
         for issue in detail.get("mid_clock_issues", []) or []:
             exception_idx[(name, str(issue.get("date", "")))].append({
                 "type": "漏打卡",
@@ -367,21 +373,25 @@ def _build_attendance_deductions(
         )
         _base_rate = float(detail.get("absence_daily_rate", 0) or 0)
         _rate_by_date = {}
+        _mark_by_date2 = {}
         for _r in detail.get("absence_records", []) or []:
             if _r.get("date") and _r.get("daily_rate") is not None:
                 _rate_by_date[_r["date"]] = float(_r.get("daily_rate") or 0)
+            if _r.get("date"):
+                _mark_by_date2[_r["date"]] = _r.get("mark", "缺岗")
         for date_str in detail.get("absence_dates", []) or []:
             if not is_charged(confirmations.get(confirm_key("absence", name, date_str), {})):
                 continue
             per_absence = round(_rate_by_date.get(date_str, _base_rate) * _mult, 2)
+            _mk = _mark_by_date2.get(date_str, "缺岗")
             rows.append({
                 "employee_name": name,
                 "position": position,
                 "work_date": date_str,
-                "exception_type": "缺岗",
+                "exception_type": _mk,
                 "deduction_rule": "缺勤扣款",
                 "deduction_amount": per_absence,
-                "calculation_detail": "缺勤扣款",
+                "calculation_detail": "减岗扣款(1倍日服务费)" if _mk == "减岗" else "缺勤扣款",
                 "rule_name": "缺勤",
             })
 
@@ -470,10 +480,10 @@ def _build_position_fulfillment(audit_results: dict) -> list[dict]:
             "area": s.get("area", ""),
             "scheduled_headcount": s.get("required_days", 0),
             "actual_attendance_count": s.get("normal_days", 0),
-            "result_status": "正常" if (s.get("shortage_days") or 0) == 0 and (s.get("pending_days") or 0) == 0 else "异常",
+            "result_status": "正常" if (s.get("shortage_days") or 0) == 0 and (s.get("pending_days") or 0) == 0 and (s.get("reduction_days") or 0) == 0 else "异常",
             "calculation_detail": (
                 f"应出勤{s.get('required_days', 0)}, 正常{s.get('normal_days', 0)}, "
-                f"缺岗{s.get('shortage_days', 0)}, 待复核{s.get('pending_days', 0)}, "
+                f"缺岗{s.get('shortage_days', 0)}, 减岗{s.get('reduction_days', 0)}, 待复核{s.get('pending_days', 0)}, "
                 f"扣款{s.get('shortage_amount', 0)}元"
             ),
         })

@@ -191,6 +191,9 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
       const dailyRate = Number(rec?.daily_rate ?? d.absence_daily_rate ?? 0)
       const multiplier = Number(d.absence_multiplier || 2.5)
       const amount = round2(dailyRate * multiplier)
+      // 缺勤记录按 mark 区分「缺岗 / 减岗」（减岗=计划性减员，1 倍日服务费）
+      const mark = (rec as { mark?: string } | undefined)?.mark || '缺岗'
+      const isReduction = mark === '减岗'
       const shift = rec ? `${rec.shift_start || ''}-${rec.shift_end || ''}` : ''
       const clocks = rec ? (rec.clock_times || []).join('\n') : ''
       records.push({
@@ -199,9 +202,11 @@ function buildExceptionRecords(details: DeductionDetail[]): ExceptionRecord[] {
         work_date: dateStr,
         position: rec?.position || d.position,
         exception_type: 'absence',
-        exception_label: '脱岗/缺勤',
+        exception_label: isReduction ? '减岗' : '脱岗/缺勤',
         amount,
-        detail: `脱岗/缺勤，日服务费${dailyRate}×${multiplier}=${amount}元`,
+        detail: isReduction
+          ? `减岗（计划性减员），日服务费${dailyRate}×${multiplier}=${amount}元`
+          : `脱岗/缺勤，日服务费${dailyRate}×${multiplier}=${amount}元`,
         shift_time: shift,
         clock_times: clocks,
         confirmed: conf?.confirmed ?? true,
@@ -219,7 +224,8 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100
 }
 
-function exceptionBadgeClass(type: string): string {
+function exceptionBadgeClass(type: string, label?: string): string {
+  if (label === '减岗') return 'bg-sky-100 text-sky-700'
   if (type === 'absence') return 'bg-red-100 text-red-700'
   if (type === 'missing_clock') return 'bg-amber-100 text-amber-700'
   if (type === 'late' || type === 'early_leave') return 'bg-orange-100 text-orange-700'
@@ -613,7 +619,7 @@ export function ConfirmationPage() {
         <p className="font-medium">操作说明：</p>
         <p className="mt-1">1. 勾选异常记录表示项目确认该异常属实，将计入扣款</p>
         <p>2. 未勾选的记录表示项目有异议，将不计入扣款</p>
-        <p>3. 点击"免打卡"可将该条异常标记为免打卡，免打卡的记录不扣款（每人每月有免打卡次数上限）</p>
+        <p>3. 仅「漏打卡」记录可使用"免打卡"（不扣款，每人每月有免打卡次数上限）；缺勤/减岗/迟到/早退不适用</p>
         <p>4. 点击"提交确认"保存确认与免打卡状态，并据此定稿本次审核结果</p>
         <p>5. 点击"生成扣款报告"按定稿结果生成审核汇总与扣款报告</p>
         <p>6. 可多次修改确认结果并重新提交、重新生成报告（每次提交都会按最新确认结果重新定稿）</p>
@@ -731,7 +737,7 @@ export function ConfirmationPage() {
                           <td className="px-4 py-3 text-slate-700">{r.work_date}</td>
                           <td className="px-4 py-3 text-slate-700">{r.position}</td>
                           <td className="px-4 py-3">
-                            <span className={`inline-block rounded-full px-2 py-1 text-xs font-medium ${exceptionBadgeClass(r.exception_type)}`}>
+                            <span className={`inline-block rounded-full px-2 py-1 text-xs font-medium ${exceptionBadgeClass(r.exception_type, r.exception_label)}`}>
                               {r.exception_label}
                             </span>
                           </td>
@@ -742,25 +748,30 @@ export function ConfirmationPage() {
                             ¥{r.amount.toFixed(2)}
                           </td>
                           <td className="px-4 py-3 text-center">
-                            <div className="flex items-center justify-center gap-1">
-                              <button
-                                className={`rounded px-2 py-1 text-xs font-medium transition ${
-                                  free
-                                    ? 'bg-amber-200 text-amber-800 hover:bg-amber-300'
-                                    : freeDisabled
-                                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                                    : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
-                                }`}
-                                disabled={freeDisabled}
-                                onClick={() => handleFreeDeduction(r.key)}
-                                title={free ? '点击取消免打卡' : `免打卡机会剩余：${freeLimit - freeUsed}次`}
-                              >
-                                {free ? '已免打卡' : '免打卡'}
-                              </button>
-                              {freeUsed >= freeLimit && !free && (
-                                <span className="text-xs text-red-500">剩余次数不足</span>
-                              )}
-                            </div>
+                            {/* 免打卡仅适用于漏打卡：缺勤/减岗/迟到/早退按合同口径不可免 */}
+                            {r.exception_type === 'missing_clock' ? (
+                              <div className="flex items-center justify-center gap-1">
+                                <button
+                                  className={`rounded px-2 py-1 text-xs font-medium transition ${
+                                    free
+                                      ? 'bg-amber-200 text-amber-800 hover:bg-amber-300'
+                                      : freeDisabled
+                                      ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                                      : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                                  }`}
+                                  disabled={freeDisabled}
+                                  onClick={() => handleFreeDeduction(r.key)}
+                                  title={free ? '点击取消免打卡' : `免打卡机会剩余：${freeLimit - freeUsed}次`}
+                                >
+                                  {free ? '已免打卡' : '免打卡'}
+                                </button>
+                                {freeUsed >= freeLimit && !free && (
+                                  <span className="text-xs text-red-500">剩余次数不足</span>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-300">—</span>
+                            )}
                           </td>
                         </tr>
                       )
