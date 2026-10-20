@@ -2,9 +2,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
   Tooltip,
   Legend,
   ComposedChart,
@@ -71,6 +68,27 @@ type BusinessTypeStat = {
   exception_rate: number
   deduction_amount: number
 }
+/** 扣款归因：某类异常造成的金额、占比、次数与单次成本 */
+type DeductionItem = {
+  type: string
+  amount: number
+  share_pct: number
+  count: number
+  unit_cost: number
+}
+/** 不产生扣款、但需要关注的预警项 */
+type WarningStats = {
+  mid_clock_issue_count: number
+  overtime_warning_count: number
+  affected_employees: number
+}
+type SupplierItem = {
+  supplier: string
+  deduction: number
+  share_pct: number
+  project_count: number
+  projects: string[]
+}
 
 type GroupSummary = {
   audit_month: string
@@ -81,9 +99,20 @@ type GroupSummary = {
   kpi: GroupKpi
   project_usage: ProjectUsage[]
   exception_type_distribution: ExceptionTypeItem[]
+  deduction_breakdown: DeductionItem[]
+  warning_stats: WarningStats
+  supplier_ranking: SupplierItem[]
   monthly_trend: TrendItem[]
   risk_projects: RiskProject[]
   business_type_stats: BusinessTypeStat[]
+}
+
+/** 每类异常的整改动作指向（文案属展示层，放在前端维护） */
+const DEDUCTION_ACTION: Record<string, string> = {
+  缺勤: '供应商未派满岗 → 约谈并按合同索赔',
+  漏打卡: '补卡流程未闭环 → 限期补卡即可追回',
+  早退: '频次高、金额小 → 现场纪律日常管控',
+  迟到: '频次高、金额小 → 现场纪律日常管控',
 }
 
 type ProjectDetail = {
@@ -112,7 +141,6 @@ type ProjectSummary = {
 
 // ---------- 常量 ----------
 
-const PIE_COLORS = ['#6366f1', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#0ea5e9']
 const BUSINESS_COLORS = ['#6366f1', '#0ea5e9', '#8b5cf6', '#f59e0b', '#10b981']
 
 function formatMonth(m: string) {
@@ -600,29 +628,94 @@ function GroupDashboard() {
         </p>
       </div>
 
-      {/* 异常构成（二线信息，供整改参考） */}
-      {summary && summary.exception_type_distribution.length > 0 && (
-        <div className="card p-6">
-          <h3 className="text-base font-semibold">异常构成分析</h3>
-          <div className="mt-2 h-56">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={summary.exception_type_distribution}
-                  dataKey="count"
-                  nameKey="type"
-                  innerRadius={50}
-                  outerRadius={85}
-                  paddingAngle={2}
-                >
-                  {summary.exception_type_distribution.map((_, i) => (
-                    <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip formatter={(v) => `${v} 次`} />
-                <Legend />
-              </PieChart>
-            </ResponsiveContainer>
+      {/* 扣款归因 + 供应商追责 */}
+      {summary && summary.deduction_breakdown.length > 0 && (
+        <div className="grid grid-cols-5 gap-4">
+          <div className="card col-span-3 p-6">
+            <h3 className="text-base font-semibold">扣款归因与整改优先级</h3>
+            <p className="mt-1 text-sm text-slate-500">
+              本月扣款 {fmtMoney(kpi?.total_deduction ?? 0)}，其中
+              <span className="font-medium text-slate-800">
+                {summary.deduction_breakdown[0].type}占 {summary.deduction_breakdown[0].share_pct}%
+              </span>
+              ，是第一大损失来源
+            </p>
+            <div className="mt-4 space-y-3">
+              {summary.deduction_breakdown.map((b, i) => (
+                <div key={b.type}>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-slate-700">
+                      {b.type}
+                      <span className="ml-2 text-xs text-slate-400">
+                        {b.count} 次 · {fmtMoney(b.unit_cost)}/次
+                      </span>
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <span className="text-xs text-slate-400">{b.share_pct}%</span>
+                      <span className="w-20 text-right font-medium text-slate-900">
+                        {fmtMoney(b.amount)}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="mt-1.5 h-2 w-full rounded-full bg-slate-100">
+                    <div
+                      className="h-2 rounded-full"
+                      style={{
+                        width: `${Math.max(b.share_pct, 1.5)}%`,
+                        background: i === 0 ? '#ef4444' : i === 1 ? '#f59e0b' : '#94a3b8',
+                      }}
+                    />
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">{DEDUCTION_ACTION[b.type] ?? '—'}</p>
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1 border-t border-slate-100 pt-3 text-xs text-slate-500">
+              <span>涉及员工 {summary.warning_stats.affected_employees} 人</span>
+              <span>中间卡异常 {summary.warning_stats.mid_clock_issue_count} 次（预警，不扣款）</span>
+              <span
+                className={summary.warning_stats.overtime_warning_count > 0 ? 'text-red-600' : ''}
+              >
+                加班预警 {summary.warning_stats.overtime_warning_count} 次
+              </span>
+            </div>
+          </div>
+
+          <div className="card col-span-2 p-6">
+            <h3 className="text-base font-semibold">供应商扣款排行</h3>
+            <p className="mt-1 text-sm text-slate-500">按扣款金额降序，可直接据此追责</p>
+            <div className="mt-4 space-y-3">
+              {summary.supplier_ranking.map((s, i) => (
+                <div key={s.supplier}>
+                  <div className="flex items-start justify-between gap-2 text-sm">
+                    <span className="text-slate-700">
+                      <span className="mr-1.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-100 text-[10px] text-slate-500">
+                        {i + 1}
+                      </span>
+                      {s.supplier}
+                    </span>
+                    <span className="flex-shrink-0 font-medium text-slate-900">
+                      {fmtMoney(s.deduction)}
+                    </span>
+                  </div>
+                  <div className="mt-1.5 h-2 w-full rounded-full bg-slate-100">
+                    <div
+                      className="h-2 rounded-full"
+                      style={{
+                        width: `${Math.max(s.share_pct, 1.5)}%`,
+                        background: i === 0 ? '#ef4444' : '#f59e0b',
+                      }}
+                    />
+                  </div>
+                  <p className="mt-1 text-xs text-slate-400">
+                    占 {s.share_pct}% · {s.project_count} 个项目
+                  </p>
+                </div>
+              ))}
+              {!summary.supplier_ranking.length && (
+                <p className="text-sm text-slate-400">当月暂无供应商扣款数据</p>
+              )}
+            </div>
           </div>
         </div>
       )}
