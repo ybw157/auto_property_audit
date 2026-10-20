@@ -867,3 +867,47 @@ def recompute_audit_totals(data: dict) -> None:
         "overtime_warning_count": (s04.get("summary", {}) or {}).get("overtime_warning_count", 0),
     }
     data["s04_attendance_audit"] = s04
+
+def audit_totals_metrics(data: dict) -> dict:
+    """返回定稿摘要（总扣款/涉及人数/确认条数/两次异常率），全部取自同一份结果。"""
+    s04 = data.get("s04_attendance_audit", {}) or {}
+    details = s04.get("deduction_details", []) or []
+    schedule_task_count = sum(
+        1 for d in (data.get("slot_details") or []) if d.get("status") not in ("休息", "请假")
+    )
+
+    exception_count = 0
+    charged_count = 0
+    for detail in details:
+        emp = detail.get("employee_name", "")
+        confs = detail.get("confirmations", {}) or {}
+        entries: list[dict] = []
+        for d in detail.get("missing_clock_dates", []) or []:
+            entries.append(confs.get(confirm_key("missing_clock", emp, d), {}))
+        for issue in detail.get("mid_clock_issues", []) or []:
+            entries.append(mid_clock_confirm(confs, emp, issue.get("date", ""), issue.get("window", "")))
+        for late in detail.get("late_details", []) or []:
+            if float(late.get("amount", 0) or 0) <= 0:
+                continue  # S04-1 迟到超合同阈值 已转漏打卡，与前端口径一致不重复计数
+            entries.append(confs.get(confirm_key("late", emp, late.get("date", "")), {}))
+        for early in detail.get("early_leave_details", []) or []:
+            if float(early.get("amount", 0) or 0) <= 0:
+                continue  # S04-1 早退超合同阈值 已转漏打卡，与前端口径一致不重复计数
+            entries.append(confs.get(confirm_key("early_leave", emp, early.get("date", "")), {}))
+        for d in detail.get("absence_dates", []) or []:
+            entries.append(confs.get(confirm_key("absence", emp, d), {}))
+        exception_count += len(entries)
+        charged_count += sum(1 for e in entries if is_charged(e))
+
+    summary = s04.get("summary", {}) or {}
+    return {
+        "total_deduction": summary.get("total_deduction", 0),
+        "affected_employees": summary.get("affected_employees", 0),
+        "confirmed_count": charged_count,
+        "first_exception_rate": (
+            round(exception_count / schedule_task_count * 100, 1) if schedule_task_count > 0 else 0
+        ),
+        "confirmed_exception_rate": (
+            round(charged_count / schedule_task_count * 100, 1) if schedule_task_count > 0 else 0
+        ),
+    }

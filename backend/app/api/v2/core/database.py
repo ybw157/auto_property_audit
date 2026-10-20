@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.v2.core.config import settings
 from app.api.v2.models.base import Base
+from app.api.v2 import models as _models  # noqa: F401  确保所有模型注册到 Base.metadata（create_all 前必须导入）
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,65 @@ def init_db() -> None:
     _migrate_audit_result_scope()
     _drop_legacy_audit_result_locked()
     _migrate_audit_result_project_name()
+    _backfill_audit_summary()
     _seed_users()
+
+
+def _backfill_audit_summary() -> None:
+    """存量 audit_results → audit_summary 幂等回填（驾驶舱摘要表预计算）。
+
+    摘要表由「审核完成 / 定稿确认」两个写入点增量维护；本函数只为历史数据补票：
+    仅处理摘要表中尚无对应行的审核结果（按四列定位键判断），已存在则跳过。
+    回填需全量解析一次存量 results_json（一次性成本，之后不再发生）。
+    """
+    from app.api.v2.models.audit_result_models import AuditResult
+    from app.api.v2.models.audit_summary_models import AuditSummary
+    from app.api.v2.service.dashboard_service import (
+        compute_audit_summary, _parse_results_json,
+    )
+
+    insp = inspect(engine)
+    if "audit_summary" not in insp.get_table_names():
+        return
+    db = SessionLocal()
+    try:
+        existing = {
+            (r.project_name, r.business_type, r.audit_month, r.service_type)
+            for r in db.query(
+                AuditSummary.project_name, AuditSummary.business_type,
+                AuditSummary.audit_month, AuditSummary.service_type,
+            ).all()
+        }
+        pending = [
+            r for r in db.query(AuditResult).all()
+            if (r.project_name, r.business_type, r.audit_month, r.service_type) not in existing
+        ]
+        if not pending:
+            return
+        logger.info(f"[audit_summary] 回填 {len(pending)} 条历史审核结果摘要...")
+        for r in pending:
+            try:
+                fields = compute_audit_summary(_parse_results_json(r.results_json))
+            except Exception:
+                logger.exception(f"[audit_summary] 回填解析失败: {r.project_name}/{r.audit_month}")
+                continue
+            row = AuditSummary(
+                project_name=r.project_name,
+                business_type=r.business_type,
+                audit_month=r.audit_month,
+                service_type=r.service_type,
+                status=r.status or "",
+                confirmed_at=r.confirmed_at or "",
+                **fields,
+            )
+            db.add(row)
+        db.commit()
+        logger.info(f"[audit_summary] 回填完成，共 {len(pending)} 条")
+    except Exception:
+        db.rollback()
+        logger.exception("[audit_summary] 回填失败")
+    finally:
+        db.close()
 
 
 def _migrate_position_service_type() -> None:
@@ -247,14 +306,6 @@ def _seed_users() -> None:
             "project_name": "",
             "project_code": "",
             "password": "admin123",
-        },
-        {
-            "username": "project_user",
-            "role": False,
-            "display_name": "项目账号（示例）",
-            "project_name": "南京金鹰中心",
-            "project_code": "",
-            "password": "proj123",
         },
     ]
 

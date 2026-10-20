@@ -48,7 +48,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 
 /** 受保护区域的路由表：path → 页面组件（菜单显隐由 Layout 的 roles 控制） */
 const protectedRoutes: Array<{ path: string; element: React.ReactNode }> = [
-  { path: '/', element: <Dashboard /> },
+  { path: '/dashboard', element: <Dashboard /> },
   { path: '/audit', element: <AiAudit /> },
   { path: '/results', element: <AuditResults /> },
   { path: '/confirmation', element: <ConfirmationPage /> },
@@ -59,6 +59,12 @@ const protectedRoutes: Array<{ path: string; element: React.ReactNode }> = [
   { path: '/bi-sync', element: <BiSync /> },
   { path: '/user-management', element: <UserManagement /> },
 ]
+
+/** 按角色决定落地页：集团管理员进驾驶舱，项目账号进 AI 审核页 */
+function RoleHomeRedirect() {
+  const { role } = useAuth()  // useAuth 已把布尔位转为 'group_admin' / 'project_user'
+  return <Navigate to={role === 'group_admin' ? '/dashboard' : '/audit'} replace />
+}
 
 export function AppRouter() {
   return (
@@ -71,7 +77,9 @@ export function AppRouter() {
               {protectedRoutes.map((r) => (
                 <Route key={r.path} path={r.path} element={r.element} />
               ))}
-              <Route path="*" element={<Navigate to="/" replace />} />
+              {/* 根路径与未知路径都按角色落到各自首页 */}
+              <Route path="/" element={<RoleHomeRedirect />} />
+              <Route path="*" element={<RoleHomeRedirect />} />
             </Routes>
           </AuthGuard>
         } />

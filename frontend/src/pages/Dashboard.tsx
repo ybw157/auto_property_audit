@@ -351,7 +351,7 @@ function GroupDashboard() {
     {
       label: '审核完成率',
       value: `${kpi?.completion_rate ?? 0}%`,
-      note: `已确认 ${kpi?.confirmed_projects ?? 0} 个 · 覆盖率 ${kpi?.audit_coverage_rate ?? 0}%`,
+      note: `已确认 ${kpi?.confirmed_projects ?? 0} 个`,
       tone: (kpi?.completion_rate ?? 0) >= 90 ? 'text-emerald-600' : 'text-amber-600',
     },
     {
@@ -466,9 +466,6 @@ function GroupDashboard() {
           <div className="card p-5">
             <div className="flex items-center justify-between">
               <span className="text-sm font-semibold text-slate-800">扣款金额 Top3</span>
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
-                {fmtMoneyShort(kpi?.total_deduction ?? 0)}
-              </span>
             </div>
             <div className="mt-3 space-y-1.5 text-sm text-slate-600">
               {deductionTop.length ? (

@@ -27,6 +27,7 @@ from app.api.v2.utils.audit_common import (
     mid_clock_confirm,
     is_charged,
     recompute_audit_totals,
+    audit_totals_metrics,
 )
 
 logger = logging.getLogger(__name__)
@@ -559,6 +560,13 @@ def start_audit(
     audit_result_dao.save_audit_result(out)
     logger.info(f"  - 版本: {new_version}, 已保存")
 
+    # 同步驾驶舱摘要表（派生数据，失败不阻断审核主流程）
+    from app.api.v2.service.dashboard_service import upsert_audit_summary
+    upsert_audit_summary(
+        project_name, business_type, audit_month, service_type,
+        status=AuditStatus.AUDITED, confirmed_at="", data=audit_out,
+    )
+
     logger.info(f"{'='*60}")
     logger.info(f"[审核完成] 总槽位数: {len(slot_details)}, 总扣款: {s04_summary.get('total_deduction', 0) if s04_rules else 0}")
     logger.info(f"{'='*60}\n")
@@ -593,49 +601,6 @@ def start_audit(
     ).to_dict()
 
 
-def audit_totals_metrics(data: dict) -> dict:
-    """返回定稿摘要（总扣款/涉及人数/确认条数/两次异常率），全部取自同一份结果。"""
-    s04 = data.get("s04_attendance_audit", {}) or {}
-    details = s04.get("deduction_details", []) or []
-    schedule_task_count = sum(
-        1 for d in (data.get("slot_details") or []) if d.get("status") not in ("休息", "请假")
-    )
-
-    exception_count = 0
-    charged_count = 0
-    for detail in details:
-        emp = detail.get("employee_name", "")
-        confs = detail.get("confirmations", {}) or {}
-        entries: list[dict] = []
-        for d in detail.get("missing_clock_dates", []) or []:
-            entries.append(confs.get(confirm_key("missing_clock", emp, d), {}))
-        for issue in detail.get("mid_clock_issues", []) or []:
-            entries.append(mid_clock_confirm(confs, emp, issue.get("date", ""), issue.get("window", "")))
-        for late in detail.get("late_details", []) or []:
-            if float(late.get("amount", 0) or 0) <= 0:
-                continue  # S04-1 迟到超合同阈值 已转漏打卡，与前端口径一致不重复计数
-            entries.append(confs.get(confirm_key("late", emp, late.get("date", "")), {}))
-        for early in detail.get("early_leave_details", []) or []:
-            if float(early.get("amount", 0) or 0) <= 0:
-                continue  # S04-1 早退超合同阈值 已转漏打卡，与前端口径一致不重复计数
-            entries.append(confs.get(confirm_key("early_leave", emp, early.get("date", "")), {}))
-        for d in detail.get("absence_dates", []) or []:
-            entries.append(confs.get(confirm_key("absence", emp, d), {}))
-        exception_count += len(entries)
-        charged_count += sum(1 for e in entries if is_charged(e))
-
-    summary = s04.get("summary", {}) or {}
-    return {
-        "total_deduction": summary.get("total_deduction", 0),
-        "affected_employees": summary.get("affected_employees", 0),
-        "confirmed_count": charged_count,
-        "first_exception_rate": (
-            round(exception_count / schedule_task_count * 100, 1) if schedule_task_count > 0 else 0
-        ),
-        "confirmed_exception_rate": (
-            round(charged_count / schedule_task_count * 100, 1) if schedule_task_count > 0 else 0
-        ),
-    }
 
 
 def update_audit_result(
@@ -855,6 +820,13 @@ def confirm_exceptions(
         confirmed_by=confirmed_by,
         confirmed_at=now_text(),
         status=AuditStatus.CONFIRMED,
+    )
+
+    # 同步驾驶舱摘要表（定稿口径，失败不阻断主流程）
+    from app.api.v2.service.dashboard_service import upsert_audit_summary
+    upsert_audit_summary(
+        project_name, business_type, audit_month, service_type,
+        status=AuditStatus.CONFIRMED, confirmed_at=now_text(), data=data,
     )
 
     return {

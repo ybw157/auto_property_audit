@@ -28,7 +28,9 @@ export function Login() {
         body: JSON.stringify({ username: username.trim(), password }),
       })
       login(data.token, data.user)
-      navigate('/audit', { replace: true })
+      // 按角色落地：集团管理员进驾驶舱，项目账号进 AI 审核页
+      // 注意 user.role 是布尔位：true=集团管理员，false=项目账号
+      navigate(data.user.role === true ? '/dashboard' : '/audit', { replace: true })
     } catch (err: any) {
       setError(err.message || '登录失败，请检查用户名和密码')
     } finally {

@@ -32,3 +32,9 @@ Thumbs.db
 tools/
 
 
+
+# 前端改造试验目录（临时，改造完成后删除）
+frontend_new/
+
+# WorkBuddy 工作区工具
+.workbuddy/
