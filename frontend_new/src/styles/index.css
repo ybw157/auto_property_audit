@@ -1,0 +1,281 @@
+/* 全局样式（纯 CSS，无 Tailwind）：设计语义类 + 布局工具类
+   色板参考 AI 工作台规范：深藏青 accent + 浅灰底，中性文字层级 */
+
+:root {
+  /* 主色板（蓝色主题） */
+  --page-bg: #FFFFFF;
+  --card-bg: #F7F8FA;
+  --card-bg-soft: #EAF0FF;
+  --card-border: #E5E6EB;
+  --card-border-light: #F2F3F5;
+  --text-strong: #1D2129;
+  --text-normal: #4E5969;
+  --text-weak: #86909C;
+  --accent: #45526C;
+  --accent-deep: #45526C;
+  --accent-light: #B3C4FB;
+  --accent-dark: #45526C;
+  --danger: #A44242;
+  --warning: #D59355;
+  --tag-normal: #666666;
+  --success: #4D9785;
+
+  /* 兼容别名：旧变量名 → 新色板（页面无需逐个改） */
+  --brand-500: var(--accent);
+  --brand-600: var(--accent);
+  --brand-700: #37455C;
+  --brand-50: var(--card-bg-soft);
+  --slate-50: #F7F8FA;
+  --slate-100: #F2F3F5;
+  --slate-200: #E5E6EB;
+  --slate-300: #C9CDD4;
+  --slate-400: var(--text-weak);
+  --slate-500: var(--text-normal);
+  --slate-600: var(--text-normal);
+  --slate-700: var(--text-strong);
+  --slate-800: var(--text-strong);
+  --slate-900: var(--text-strong);
+  --slate-950: #1D2129;
+  --red-600: var(--danger);
+  --amber-600: var(--warning);
+  --emerald-600: var(--success);
+}
+
+/* 图表 9 色系（三主题共用） */
+:root {
+  --chart-1: #5070DD;
+  --chart-2: #B6D634;
+  --chart-3: #505372;
+  --chart-4: #FF994D;
+  --chart-5: #0CA8DF;
+  --chart-6: #FFD10A;
+  --chart-7: #FB628B;
+  --chart-8: #785DB0;
+  --chart-9: #3FBE95;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page-bg);
+  color: var(--text-strong);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+/* Element Plus 主色对齐色板 accent */
+:root {
+  --el-color-primary: #45526C;
+  --el-color-primary-light-3: #6B7E9C;
+  --el-color-primary-light-5: #91A1BC;
+  --el-color-primary-light-7: #B8C4DC;
+  --el-color-primary-light-8: #CBD5E8;
+  --el-color-primary-light-9: #EAF0FF;
+  --el-color-primary-dark-2: #37455C;
+}
+
+/* 原生 button 重置 */
+button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+}
+
+/* ---------- 语义类 ---------- */
+.card {
+  border-radius: 12px;
+  border: 1px solid var(--card-border);
+  background: #fff;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+}
+
+.btn-primary {
+  border-radius: 8px;
+  background: var(--accent);
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #fff;
+  transition: background 0.15s;
+}
+.btn-primary:hover:not(:disabled) {
+  background: #37455C;
+}
+.btn-primary:disabled {
+  opacity: 0.5;
+}
+
+.btn-secondary {
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: #fff;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-normal);
+  transition: background 0.15s;
+}
+.btn-secondary:hover:not(:disabled) {
+  background: var(--card-bg);
+}
+.btn-secondary:disabled {
+  opacity: 0.5;
+}
+
+.input {
+  border-radius: 8px;
+  border: 1px solid var(--slate-300);
+  background: #fff;
+  padding: 8px 12px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--card-bg-soft);
+}
+
+/* ---------- el-menu 深色侧边栏 ---------- */
+.sidebar-menu.el-menu {
+  border-right: none;
+  --el-menu-bg-color: transparent;
+  --el-menu-text-color: #A9AEB8;
+  --el-menu-hover-bg-color: rgba(255, 255, 255, 0.08);
+  --el-menu-active-color: #ffffff;
+}
+.sidebar-menu .el-menu-item {
+  border-radius: 8px;
+  margin: 2px 0;
+}
+.sidebar-menu .el-menu-item.is-active {
+  background: var(--accent);
+}
+/* 折叠态：菜单项占满宽度（免疫容器内边距），选中块画在图标本身 */
+.sidebar-menu.el-menu--collapse {
+  width: 100%;
+  padding: 0;
+}
+.sidebar-menu.el-menu--collapse .el-menu-item {
+  width: 100%;
+  height: 44px;
+  margin: 0;
+  padding: 0 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+}
+.sidebar-menu.el-menu--collapse .el-menu-item .el-icon {
+  margin: 0 !important;
+}
+/* 折叠态 tooltip 触发层：EP 默认 padding 0 20px + 左对齐，会把图标推出中心，强制居中 */
+.sidebar-menu.el-menu--collapse .el-menu-item .el-menu-tooltip__trigger {
+  padding: 0;
+  justify-content: center;
+}
+.sidebar-menu.el-menu--collapse .el-menu-item.is-active {
+  background: transparent;
+}
+.sidebar-menu.el-menu--collapse .el-menu-item.is-active .el-icon {
+  background: var(--accent);
+  border-radius: 8px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+/* ---------- 跨页复用的布局/展示类（原 Tailwind 组合的语义化） ---------- */
+
+/* 页面级纵向间距容器 */
+.page-stack { display: flex; flex-direction: column; gap: 20px; }
+
+/* 窄版页面（表单/上传类）：不铺满宽屏 */
+.page-narrow { max-width: 760px; margin: 0 auto; width: 100%; }
+
+/* 文本 */
+.text-muted { color: var(--slate-500); font-size: 14px; }
+.text-sm { font-size: 14px; }
+.text-xs { font-size: 12px; }
+.text-strong { color: var(--slate-900); font-weight: 600; }
+.text-danger { color: var(--red-600); }
+.text-warn { color: var(--amber-600); }
+.text-success { color: var(--emerald-600); }
+
+/* 行内弹性布局 */
+.row { display: flex; align-items: center; }
+.row-between { display: flex; align-items: center; justify-content: space-between; }
+.row-wrap { display: flex; flex-wrap: wrap; align-items: center; }
+.gap-2 { gap: 8px; }
+.gap-3 { gap: 12px; }
+.gap-4 { gap: 16px; }
+
+/* 统计小卡（浅色底） */
+.stat-box {
+  border-radius: 16px;
+  border: 1px solid var(--slate-200);
+  background: var(--slate-50);
+  padding: 16px;
+}
+.stat-box .stat-label { font-size: 14px; color: var(--slate-500); }
+.stat-box .stat-value { margin-top: 8px; font-size: 24px; font-weight: 600; color: var(--slate-900); }
+
+/* 徽章（规范：实心底白字） */
+.badge { display: inline-block; border-radius: 6px; padding: 2px 8px; font-size: 12px; font-weight: 500; color: #fff; }
+.badge-green { background: var(--success); }
+.badge-blue { background: var(--chart-1); }
+.badge-red { background: var(--danger); }
+.badge-amber { background: var(--warning); }
+.badge-slate { background: var(--tag-normal); }
+.badge-purple { background: var(--chart-8); }
+.badge-orange { background: var(--chart-4); }
+.badge-sky { background: var(--chart-5); }
+
+/* 提示条 */
+.notice { margin-top: 12px; border-radius: 12px; padding: 12px 16px; font-size: 14px; color: var(--slate-600); background: var(--slate-50); }
+.notice-success { background: #ecfdf5; color: #047857; }
+.notice-danger { background: #fef2f2; color: var(--red-600); }
+.notice-info { background: #eff6ff; color: #1d4ed8; }
+.notice-warn { background: #fffbeb; color: #b45309; }
+
+/* 表格容器 */
+.table-wrap { overflow-x: auto; border-radius: 16px; border: 1px solid var(--slate-200); }
+.table-plain { width: 100%; border-collapse: collapse; font-size: 14px; }
+.table-plain th {
+  background: var(--slate-50);
+  color: var(--slate-600);
+  font-weight: 500;
+  text-align: left;
+  padding: 10px 16px;
+}
+.table-plain td { padding: 10px 16px; border-top: 1px solid var(--slate-100); color: var(--slate-700); }
+.table-plain tbody tr:hover { background: var(--slate-50); }
+.table-plain .cell-danger td { background: #fef2f2; color: #991b1b; }
+
+/* 网格 */
+.grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+.grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
+
+/* 卡片内边距 */
+.card-pad { padding: 24px; }
+
+/* 空态/加载态 */
+.empty-state { padding: 32px; text-align: center; font-size: 14px; color: var(--slate-500); }
+
+/* el-card 全局圆角（比默认 4px 更柔和） */
+.el-card { border-radius: 12px; }

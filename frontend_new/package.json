@@ -1,0 +1,28 @@
+{
+  "name": "property-audit-frontend-vue",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "axios": "^1.20.0",
+    "echarts": "^5.5.1",
+    "element-plus": "^2.9.1",
+    "nprogress": "^0.2.0",
+    "pinia": "^2.3.0",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/nprogress": "^0.2.3",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "postcss": "^8.4.49",
+    "typescript": "^5.7.2",
+    "vue-tsc": "^2.2.0"
+  }
+}
